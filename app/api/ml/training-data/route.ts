@@ -1,0 +1,132 @@
+import { NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
+const BUCKET = "training-data";
+const MAX_BYTES = 3 * 1024 * 1024;
+
+function cookieName() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
+  const match = url.match(/https?:\/\/([^./]+)/);
+  return `sb-${match ? match[1] : "xflsxzmniseetvkrddmj"}-auth-token`;
+}
+
+function getToken(req: Request): string | null {
+  const header = req.headers.get("authorization");
+  if (header?.toLowerCase().startsWith("bearer ")) return header.slice(7);
+  const cookie = req.headers.get("cookie");
+  if (!cookie) return null;
+  for (const part of cookie.split(";")) {
+    const [k, ...rest] = part.trim().split("=");
+    if (k === cookieName()) {
+      try {
+        const parsed = JSON.parse(decodeURIComponent(rest.join("=")));
+        if (parsed?.access_token) return parsed.access_token;
+      } catch {
+        return rest.join("=");
+      }
+    }
+  }
+  return null;
+}
+
+async function assertAdmin(req: Request) {
+  const token = getToken(req);
+  if (!token) return "Not authenticated.";
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+  const svc = createClient(url, anon, {
+    global: { headers: { Authorization: `Bearer ${token}` } },
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  const { data, error } = await svc.auth.getUser();
+  if (error || !data.user) return "Session expired. Please log in again.";
+  const { data: row } = await svc.from("users").select("role").eq("auth_user_id", data.user.id).maybeSingle();
+  if (!row || row.role !== "Admin") return "Only admins can manage training data.";
+  return true;
+}
+
+function serviceBucket() {
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!key) return null;
+  const sb = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+  return sb.storage.from(BUCKET);
+}
+
+export async function GET(req: Request) {
+  const auth = await assertAdmin(req);
+  if (auth !== true) return NextResponse.json({ error: auth }, { status: 401 });
+  const bucket = serviceBucket();
+  if (!bucket) return NextResponse.json({ error: "Server is missing SUPABASE_SERVICE_ROLE_KEY." }, { status: 500 });
+  const { data, error } = await bucket.list("historical", { limit: 10 });
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  const file = (data || []).find((f) => f.metadata) || null;
+  if (!file?.metadata) return NextResponse.json({ file: null });
+  return NextResponse.json({
+    file: {
+      name: file.name,
+      size: file.metadata.size,
+      mimetype: file.metadata.mimetype,
+      updated_at: file.updated_at ?? file.created_at,
+    },
+  });
+}
+
+export async function POST(req: Request) {
+  const auth = await assertAdmin(req);
+  if (auth !== true) return NextResponse.json({ error: auth }, { status: 401 });
+
+  let form: FormData;
+  try {
+    form = await req.formData();
+  } catch {
+    return NextResponse.json({ error: "Upload must be multipart/form-data." }, { status: 400 });
+  }
+  const file = form.get("file");
+  if (!(file instanceof File)) return NextResponse.json({ error: "No file chosen." }, { status: 400 });
+
+  const lower = file.name.toLowerCase();
+  const isCsv = lower.endsWith(".csv");
+  const isXlsx = lower.endsWith(".xlsx");
+  if (!isCsv && !isXlsx) return NextResponse.json({ error: "Only .csv or .xlsx files are accepted." }, { status: 400 });
+  if (file.size > MAX_BYTES) return NextResponse.json({ error: "File must be 3 MB or smaller." }, { status: 400 });
+
+  const text = isCsv ? await file.text() : null;
+  let warning: string | undefined;
+  if (isCsv) {
+    const header = (text || "").split(/\r?\n/, 1)[0]?.toLowerCase() || "";
+    const incomeLike = ["income", "annual", "salary", "family", "gross", "amount"].some((k) => header.includes(k));
+    if (!incomeLike) {
+      warning =
+        "No income column detected. The file was saved, but its rows will train with a neutral need score. Ranking still works normally.";
+    }
+  }
+
+  const bucket = serviceBucket();
+  if (!bucket) return NextResponse.json({ error: "Server is missing SUPABASE_SERVICE_ROLE_KEY." }, { status: 500 });
+
+  await bucket.remove(["historical/training_data.csv", "historical/training_data.xlsx"]);
+  const objectPath = isCsv ? "historical/training_data.csv" : "historical/training_data.xlsx";
+  const bytes = Buffer.from(await file.arrayBuffer());
+  const { error: upErr } = await bucket.upload(objectPath, bytes, {
+    contentType: isCsv ? "text/csv" : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    upsert: true,
+  });
+  if (upErr) return NextResponse.json({ error: upErr.message }, { status: 500 });
+
+  return NextResponse.json({ ok: true, name: file.name, size: file.size, ...(warning ? { warning } : {}) });
+}
+
+export async function DELETE(req: Request) {
+  const auth = await assertAdmin(req);
+  if (auth !== true) return NextResponse.json({ error: auth }, { status: 401 });
+  const bucket = serviceBucket();
+  if (!bucket) return NextResponse.json({ error: "Server is missing SUPABASE_SERVICE_ROLE_KEY." }, { status: 500 });
+  const { error } = await bucket.remove(["historical/training_data.csv", "historical/training_data.xlsx"]);
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  return NextResponse.json({ ok: true });
+}

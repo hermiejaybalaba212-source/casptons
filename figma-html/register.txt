@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Register — Scholarship System</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Segoe UI',system-ui,Arial,sans-serif;color:#241012;min-height:100vh}
+  .split{display:flex;min-height:100vh}
+  /* ===== LEFT MAROON PANEL ===== */
+  .aside{display:none;width:38%;background:linear-gradient(to bottom,#7B1113,#5A0C0E 55%,#3E0009);color:#fff;padding:40px;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden}
+  @media(min-width:1024px){.aside{display:flex}}
+  .aside-deco-1{position:absolute;right:-96px;top:-96px;width:288px;height:288px;border-radius:50%;background:rgba(255,255,255,.05)}
+  .aside-deco-2{position:absolute;left:-64px;bottom:-128px;width:320px;height:320px;border-radius:50%;background:rgba(0,0,0,.2)}
+  .brand{position:relative;display:flex;align-items:center;gap:12px}
+  .brand p{line-height:1.3}
+  .brand .t1{font-size:18px;font-weight:700}
+  .brand .t2{font-size:12px;color:rgba(255,255,255,.7)}
+  .aside h1{margin-top:16px;font-size:30px;line-height:1.4;font-weight:700}
+  .aside .eyebrow{font-size:11px;font-weight:600;letter-spacing:.25em;text-transform:uppercase;color:rgba(255,255,255,.7)}
+  .feature-list{list-style:none;margin-top:28px;display:flex;flex-direction:column;gap:12px}
+  .feature-list li{display:flex;align-items:flex-start;gap:12px;font-size:14px;color:rgba(255,255,255,.85)}
+  .feature-list li em{font-style:normal;margin-top:2px;flex:none;width:20px;height:20px;border-radius:50%;background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700}
+  .aside foot{position:relative;font-size:12px;line-height:1.6;color:rgba(255,255,255,.6)}
+  /* ===== MAIN ===== */
+  .main{flex:1;display:flex;align-items:flex-start;justify-content:center;background:#fff;padding:32px 16px}
+  .box{width:100%;max-width:768px}
+  .mobile-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+  @media(min-width:1024px){.mobile-top{display:none}}
+  .brand-sm{font-weight:700;font-size:14px}
+  .brand-sm small{display:block;font-size:10px;color:#6B5458;font-weight:400}
+  .link-login{border:1px solid rgba(123,17,19,.3);color:#7B1113;font-size:12px;font-weight:600;padding:8px 12px;border-radius:8px;text-decoration:none}
+  .head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+  .head .eyebrow{font-size:11px;font-weight:600;letter-spacing:.25em;text-transform:uppercase;color:#7B1113}
+  .head h1{margin-top:6px;font-size:30px;font-weight:700;line-height:1.2}
+  .head p.desc{margin-top:6px;font-size:14px;color:#6B5458}
+  .head p.desc b{color:#7B1113}
+  .head .link-login-lg{display:none;font-size:14px;font-weight:600;color:#7B1113;text-decoration:none;white-space:nowrap}
+  @media(min-width:1024px){.head .link-login-lg{display:inline-block}}
+  .alert{margin-top:16px;border-radius:12px;padding:12px 16px;font-size:14px;display:none}
+  .alert.err{border:1px solid #fecaca;background:#fef2f2;color:#b91c1c;display:block}
+  .alert.ok{border:1px solid #bbf7d0;background:#f0fdf4;color:#15803d;display:block}
+  /* ===== SECTIONS ===== */
+  section{padding-top:24px;border-bottom:1px solid rgba(123,17,19,.08)}
+  .sec-title{display:flex;align-items:center;gap:12px}
+  .sec-title .num{width:28px;height:28px;flex:none;border-radius:8px;background:#7B1113;color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .sec-title h2{font-size:16px;font-weight:700;color:#241012}
+  .sec-title .rule{height:1px;flex:1;background:rgba(123,17,19,.1)}
+  .grid{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px}
+  .grid>.field{flex:1 1 100%}
+  @media(min-width:768px){.grid>.field{flex:1 1 calc(33.333% - 9.33px)}}
+  .grid.grid-2>.field{flex:1 1 calc(50% - 7px)}
+  .field label{display:block;margin-bottom:4px;font-size:12px;font-weight:700;color:#241012}
+  .field label b{color:#7B1113}
+  .field input,.field select{width:100%;border:1px solid rgba(123,17,19,.25);background:#fff;border-radius:8px;padding:10px 12px;font-size:14px;color:#241012;box-sizing:border-box;outline:none;transition:.15s}
+  .field input::placeholder{color:#8B7376;font-size:12px}
+  .field input:focus,.field select:focus{border-color:#7B1113;box-shadow:0 0 0 4px rgba(123,17,19,.1)}
+  .field select{appearance:none;background-image:url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%237B1113' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center}
+  /* ===== APPLICANT CHIPS ===== */
+  .chip-grid{display:flex;flex-wrap:wrap;gap:12px;margin-top:12px}
+  .chip-grid>.chip{flex:1 1 100%}
+  @media(min-width:640px){.chip-grid>.chip{flex:1 1 calc(50% - 6px)}}
+  .chip{display:flex;align-items:center;justify-content:space-between;gap:12px;border:2px solid rgba(123,17,19,.1);background:#fff;border-radius:12px;padding:12px 16px;cursor:pointer;transition:.15s;text-align:left}
+  .chip:hover{border-color:rgba(123,17,19,.3)}
+  .chip.active{border-color:#7B1113;background:#FAF7F5;box-shadow:0 1px 6px rgba(123,17,19,.08)}
+  .chip .ct{font-size:14px;font-weight:700}
+  .chip .cd{margin-top:2px;font-size:12px;color:#6B5458}
+  .chip .radio{width:20px;height:20px;flex:none;border-radius:50%;border:2px solid rgba(107,84,88,.3)}
+  .chip.active .radio{border-color:#7B1113;background:#7B1113}
+  .chip.active .radio::after{content:"";display:block;width:8px;height:8px;margin:4px auto;border-radius:50%;background:#fff}
+  /* ===== PASSWORD ===== */
+  .pas-wrap{position:relative}
+  .pas-wrap input{padding-right:52px}
+  .pas-wrap .toggle{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;font-size:12px;font-weight:600;color:#7B1113;cursor:pointer}
+  /* ===== FOOTER ===== */
+  .foot-row{padding-top:20px;padding-bottom:8px}
+  .agree{display:flex;align-items:flex-start;gap:8px;font-size:12px;color:#6B5458;line-height:1.6}
+  .agree input{accent-color:#7B1113;margin-top:3px}
+  .foot-cta{margin-top:20px;display:flex;flex-direction:column-reverse;gap:12px}
+  @media(min-width:640px){.foot-cta{flex-direction:row;align-items:center;justify-content:space-between}}
+  .foot-cta p{font-size:12px;color:#8B7376;line-height:1.6}
+  .btn{background:linear-gradient(to right,#7B1113,#540111);color:#fff;font-size:14px;font-weight:700;border:none;border-radius:12px;padding:14px 32px;cursor:pointer;box-shadow:0 4px 12px rgba(123,17,19,.2);transition:.2s;white-space:nowrap}
+  .btn:hover{filter:brightness(1.1)}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+</style>
+</head>
+<body>
+<div class="split">
+
+  <!-- LEFT PANEL -->
+  <aside class="aside">
+    <div class="aside-deco-1"></div>
+    <div class="aside-deco-2"></div>
+    <div class="brand">
+      <div>
+        <p class="t1">St. Peter&rsquo;s College</p>
+        <p class="t2">Iligan City</p>
+      </div>
+    </div>
+    <div>
+      <p class="eyebrow">Student Registration</p>
+      <h1>Start your scholarship journey today.</h1>
+      <ul class="feature-list">
+        <li><em>&#10003;</em>Verified against the Registrar Information System</li>
+        <li><em>&#10003;</em>Upload COR, Valid ID &amp; academic records securely</li>
+        <li><em>&#10003;</em>Apply with the official CHED form and ITR proof</li>
+        <li><em>&#10003;</em>Track application status and notifications live</li>
+      </ul>
+    </div>
+    <p class="foot">&copy; 2026 St. Peter&rsquo;s College &middot; Scholarship &amp; Financial Aid Office</p>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+    <div class="box">
+      <div class="mobile-top">
+        <div class="brand-sm">St. Peter&rsquo;s College<small>Scholarship System</small></div>
+        <a href="login.txt" class="link-login">Log in</a>
+      </div>
+
+      <div class="head">
+        <div>
+          <p class="eyebrow">Student Registration</p>
+          <h1>Create Your Scholarship Account</h1>
+          <p class="desc">Fill out all required fields <b>*</b> to register.</p>
+        </div>
+        <a href="login.txt" class="link-login-lg">Already have an account? Log in</a>
+      </div>
+
+      <div class="alert err">We could not save your account. Please double-check your details.</div>
+
+      <form id="regForm">
+        <!-- SECTION 01 -->
+        <section>
+          <div class="sec-title"><span class="num">01</span><h2>Applicant Type</h2><span class="rule"></span></div>
+          <div class="chip-grid">
+            <button type="button" class="chip active" onclick="pick(this,'Freshman')">
+              <span><span class="ct">Freshman</span><br><span class="cd">Using Senior High School records</span></span>
+              <span class="radio"></span>
+            </button>
+            <button type="button" class="chip" onclick="pick(this,'Alumni')">
+              <span><span class="ct">Alumni</span><br><span class="cd">Using college academic records</span></span>
+              <span class="radio"></span>
+            </button>
+          </div>
+        </section>
+
+        <!-- SECTION 02 -->
+        <section>
+          <div class="sec-title"><span class="num">02</span><h2>Personal Details</h2><span class="rule"></span></div>
+          <div class="grid">
+            <div class="field"><label>Student Number <b>*</b></label><input placeholder="2023-00010" value="2024-00101"></div>
+            <div class="field"><label>Sex <b>*</b></label><select><option>Male</option><option selected>Female</option></select></div>
+            <div class="field"><label>Birthdate <b>*</b></label><input type="date" value="2003-03-15"></div>
+            <div class="field"><label>Given Name <b>*</b></label><input placeholder="Juan" value="Ana"></div>
+            <div class="field"><label>Middle Name</label><input placeholder="Santos (optional)"></div>
+            <div class="field"><label>Last Name <b>*</b></label><input placeholder="Dela Cruz" value="Reyes"></div>
+            <div class="field"><label>Extension Name</label><input placeholder="Jr., Sr., III"></div>
+            <div class="field"><label>Program Name <b>*</b></label><select><option selected>Bachelor of Science in Information Technology</option></select></div>
+            <div class="field"><label>Year Level <b>*</b></label><select><option>1st Year</option><option selected>3rd Year</option></select></div>
+          </div>
+        </section>
+
+        <!-- SECTION 03 -->
+        <section>
+          <div class="sec-title"><span class="num">03</span><h2>Account Credentials</h2><span class="rule"></span></div>
+          <div class="grid">
+            <div class="field"><label>Username <b>*</b></label><input placeholder="juandelacruz" value="ana.reyes"></div>
+            <div class="field"><label>Email Address <b>*</b></label><input type="email" placeholder="juan.delacruz@gmail.com" value="ana.reyes@student.spc.edu.ph"></div>
+            <div class="field" style="visibility:hidden"><label>.</label><input></div>
+            <div class="field">
+              <label>Password <b>*</b></label>
+              <div class="pas-wrap">
+                <input type="password" placeholder="At least 8 characters" value="secret123" id="pw">
+                <button type="button" class="toggle" id="pwT" onclick="toggle('pw','pwT')">Show</button>
+              </div>
+            </div>
+            <div class="field">
+              <label>Confirm Password <b>*</b></label>
+              <div class="pas-wrap">
+                <input type="password" placeholder="Repeat password" value="secret123" id="pw2">
+                <button type="button" class="toggle" id="pw2T" onclick="toggle('pw2','pw2T')">Show</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- FOOTER -->
+        <div class="foot-row">
+          <label class="agree"><input type="checkbox" checked> I confirm that the information I provided is accurate and corresponds to my registered student record.</label>
+          <div class="foot-cta">
+            <p>After registering, you can log in to continue with documents, academic records and scholarship application.</p>
+            <button type="submit" class="btn">Create Student Account</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </main>
+
+</div>
+<script>
+  function pick(el){
+    document.querySelectorAll('.chip').forEach(function(c){c.classList.remove('active');});
+    el.classList.add('active');
+    var refresh=el.textContent.indexOf('Freshman')>-1;
+    var yl=document.querySelector('select:nth-of-type(4)');
+  }
+  function toggle(id,btn){
+    var el=document.getElementById(id);
+    var b=document.getElementById(btn);
+    if(el.type==='password'){el.type='text';b.textContent='Hide';}
+    else{el.type='password';b.textContent='Show';}
+  }
+</script>
+</body>
+</html>

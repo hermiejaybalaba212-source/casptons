@@ -1,0 +1,84 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# secrets & service keys - NEVER commit these
+servicerole.txt
+*.service-role*.txt
+.env.local
+SUPABASE-ACCESS.md
+AGENTS.md
+CLAUDE.md
+
+# scratch / working notes
+error.txt
+fix it.txt
+full system infromation details.txt
+Process_function.txt
+start.bat
+github.txt
+Accountest.txt
+
+# local dev logs
+dev-server.log
+dev-server.pid
+*.log
+
+# tesseract OCR language data (auto-downloaded)
+eng.traineddata
+*.traineddata
+
+# local working files / DB dumps & notes (may contain test credentials)
+*.sql
+*.docx
+csv in applications schoalrships.txt
+updated comments.txt
+balaba-magbaril-system-Comments.docx
+
+# python
+__pycache__/
+*.pyc
+
+# ml artifacts (machine-generated)
+ml/models/
+.vercel
+.env*
+devlog.txt

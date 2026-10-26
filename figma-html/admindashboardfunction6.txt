@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin Console — Function 6: Machine Learning Ranking (6.0)</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Segoe UI',system-ui,Arial,sans-serif;background:#f9fafb;color:#111827;min-height:100vh}
+  /* ===== ADMIN SIDEBAR SHELL ===== */
+  aside{position:fixed;inset:0 auto 0 0;width:256px;z-index:50;display:flex;flex-direction:column;background:linear-gradient(to bottom,#1a1a2e,#16213e 55%,#0f3460);box-shadow:0 10px 30px rgba(0,0,0,.3)}
+  .sb-head{display:flex;align-items:center;gap:12px;height:64px;border-bottom:1px solid rgba(255,255,255,.1);padding:0 20px}
+  .sb-logo{width:36px;height:36px;flex:none;border-radius:8px;background:rgba(255,255,255,.1);color:#fff;font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .sb-title{font-size:14px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sb-sub{font-size:10px;color:rgba(255,255,255,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  nav.sb-nav{flex:1;overflow-y:auto;padding:16px 12px}
+  nav.sb-nav ul{list-style:none}
+  nav.sb-nav li{margin-bottom:4px}
+  .sb-item{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:12px;text-decoration:none;font-size:12px;font-weight:500;transition:.2s}
+  .sb-item .ic{width:28px;height:28px;flex:none;border-radius:8px;font-size:11px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.05);color:rgba(255,255,255,.5)}
+  .sb-item .tx{min-width:0;flex:1;line-height:1.3}
+  .sb-item .pf{flex:none;font-size:8px;font-weight:700;padding:2px 4px;border-radius:4px;background:rgba(255,255,255,.05);color:rgba(255,255,255,.3)}
+  .sb-item{color:rgba(255,255,255,.6)}
+  .sb-item:hover{background:rgba(255,255,255,.08);color:#fff}
+  .sb-item.active{background:rgba(255,255,255,.15);color:#fff;box-shadow:0 4px 12px rgba(0,0,0,.2)}
+  .sb-item.active .ic,.sb-item.active .pf{background:rgba(255,255,255,.2);color:#fff}
+  .sb-item:hover .ic{background:rgba(255,255,255,.1);color:rgba(255,255,255,.8)}
+  .sb-foot{border-top:1px solid rgba(255,255,255,.1);padding:16px}
+  .sb-user{display:flex;align-items:center;gap:12px}
+  .sb-avatar{width:36px;height:36px;flex:none;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .sb-uname{font-size:12px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sb-urole{font-size:10px;color:rgba(255,255,255,.4)}
+  .sb-icons{display:flex;gap:6px;margin-left:auto}
+  .sb-icon{position:relative;width:32px;height:32px;flex:none;border-radius:8px;background:none;border:none;color:rgba(255,255,255,.4);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.2s}
+  .sb-icon:hover{background:rgba(255,255,255,.1);color:#fff}
+  .bell-badge{position:absolute;top:-4px;right:-6px;height:16px;min-width:16px;padding:0 4px;border-radius:999px;background:#dc2626;color:#fff;font-size:8px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  /* ===== MAIN ===== */
+  main{margin-left:256px;padding:24px 32px;min-height:100vh}
+  .page-title{font-size:20px;font-weight:700;color:#241012}
+  .msg{border:1px solid rgba(123,17,19,.2);background:#fff;color:#7B1113;border-radius:12px;padding:12px 16px;font-size:12px;font-weight:600;margin-top:16px}
+  /* training data card */
+  .card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.05);margin-top:16px}
+  .card-head{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px}
+  .card-head h2{font-size:14px;font-weight:700;color:#241012}
+  .lil{border:1px solid rgba(123,17,19,.3);color:#7B1113;background:#fff;font-size:10px;font-weight:700;padding:6px 12px;border-radius:8px;cursor:pointer}
+  .lil:hover{background:rgba(123,17,19,.05)}
+  textarea.csv{margin-top:12px;width:100%;height:150px;border:2px dashed #d1d5db;background:#f9fafb;border-radius:10px;padding:12px;font-family:Consolas,monospace;font-size:11px;color:#241012;resize:none;outline:none;box-sizing:border-box}
+  textarea.csv:focus{border-color:#7B1113}
+  .ck{display:flex;align-items:center;gap:8px;font-size:11px;color:#6B5458;margin-top:10px}
+  .ck input{accent-color:#7B1113}
+  /* action buttons */
+  .acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+  .btn-run{background:#7B1113;color:#fff;border:none;font-size:12px;font-weight:700;padding:10px 16px;border-radius:10px;cursor:pointer}
+  .btn-run:hover{background:#540111}
+  .btn-out{border:1px solid rgba(123,17,19,.3);color:#7B1113;background:#fff;font-size:12px;font-weight:700;padding:9px 14px;border-radius:10px;cursor:pointer}
+  .btn-out:hover{background:rgba(123,17,19,.05)}
+  .rf-info{margin-top:12px;font-size:11px;font-weight:600;color:#7B1113}
+  /* ranked table */
+  .table-wrap{overflow-x:auto;background:#fff;border:1px solid #e5e7eb;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,.05);margin-top:16px}
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  thead th{background:#f9fafb;color:#6b7280;font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;text-align:left;padding:12px 14px;border-bottom:1px solid #e5e7eb}
+  tbody td{padding:12px 14px;border-bottom:1px solid #f3f4f6;color:#6B5458}
+  tbody tr:last-child td{border-bottom:none}
+  td.rank{font-weight:700;color:#7B1113}
+  td.name{font-weight:600;color:#241012}
+  td.mono{font-family:Consolas,monospace;font-size:11px}
+  .pred{display:inline-flex;border-radius:999px;padding:2px 10px;font-size:10px;font-weight:700}
+  .pred-high{background:#fee2e2;color:#b91c1c}
+  .pred-low{background:#dcfce7;color:#15803d}
+  a.vew{font-weight:600;color:#7B1113;cursor:pointer}
+</style>
+</head>
+<body>
+
+<!-- ===== SIDEBAR ===== -->
+<aside>
+  <div class="sb-head">
+    <div class="sb-logo">SPC</div>
+    <div style="min-width:0">
+      <p class="sb-title">St. Peter's College</p>
+      <p class="sb-sub">Administrator Console</p>
+    </div>
+  </div>
+  <nav class="sb-nav">
+    <ul>
+      <li><a href="admindashboardfunction1.txt" class="sb-item"><span class="ic">🔐</span><span class="tx">Login</span><span class="pf">1.0</span></a></li>
+      <li><a href="admindashboardfunction2.txt" class="sb-item"><span class="ic">➕</span><span class="tx">Create Account</span><span class="pf">2.0</span></a></li>
+      <li><a href="admindashboardfunction3.txt" class="sb-item"><span class="ic">👥</span><span class="tx">User Management</span><span class="pf">3.0</span></a></li>
+      <li><a href="admindashboardfunction4.txt" class="sb-item"><span class="ic">📋</span><span class="tx">Manage Scholarship Programs</span><span class="pf">4.0</span></a></li>
+      <li><a href="admindashboardfunction5.txt" class="sb-item"><span class="ic">📄</span><span class="tx">Scholarship Applications</span><span class="pf">5.0</span></a></li>
+      <li><a href="#" class="sb-item active"><span class="ic">🤖</span><span class="tx">Machine Learning Ranking</span><span class="pf">6.0</span></a></li>
+      <li><a href="admindashboardfunction7.txt" class="sb-item"><span class="ic">✅</span><span class="tx">Approvals / Validate</span><span class="pf">7.0</span></a></li>
+      <li><a href="admindashboardfunction8.txt" class="sb-item"><span class="ic">🔔</span><span class="tx">Notifications and Announcement</span><span class="pf">8.0</span></a></li>
+      <li><a href="admindashboardfunction9.txt" class="sb-item"><span class="ic">📁</span><span class="tx">Documents Viewer</span></a></li>
+    </ul>
+  </nav>
+  <div class="sb-foot">
+    <div class="sb-user">
+      <div class="sb-avatar">A</div>
+      <div style="min-width:0">
+        <p class="sb-uname">@admin</p>
+        <p class="sb-urole">Administrator</p>
+      </div>
+      <div class="sb-icons">
+        <a class="sb-icon" href="admindashboardfunction8.txt" title="Notifications"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg><span class="bell-badge">1</span></a>
+        <button class="sb-icon" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg></button>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<!-- ===== MAIN ===== -->
+<main>
+  <h1 class="page-title">ML Ranking</h1>
+  <div class="msg">Ranking complete — 2 applicants prioritized. CHED forms ready for export after review. Model accuracy: 93.8%</div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Training Data</h2>
+      <div style="display:flex;gap:8px">
+        <button class="lil">⬆ Upload CSV</button>
+        <button class="lil">Read Clipboard</button>
+      </div>
+    </div>
+    <textarea class="csv" placeholder="Paste CSV training data here (Ctrl+V)...
+Columns: annual_income_family, shs_gwa, college_gpa, year_level, sex, high_need
+
+Example:
+annual_income_family,shs_gwa,year_level,sex,high_need
+120000,92,3rd,Female,1
+250000,88,2nd,Male,0"></textarea>
+    <label class="ck"><input type="checkbox" checked>Use clipboard data as training input (combined with synthetic data)</label>
+  </div>
+
+  <div class="acts">
+    <button class="btn-run">Run ML Ranking (2 pending)</button>
+    <button class="btn-out">Save &amp; Send to CHED</button>
+    <button class="btn-out">⬇ Export Ranking CSV (full details)</button>
+    <button class="btn-out">⬇ Export CHED Forms CSV</button>
+  </div>
+
+  <p class="rf-info">Random Forest — 100 trees &middot; 400 training samples &middot; Accuracy 93.8% &middot; Precision 88.9% &middot; Recall 97.0% &middot; F1 92.8%</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Rank</th><th>Student</th><th>Student #</th><th>Scholarship</th><th>Annual Income</th>
+          <th>GWA/GPA</th><th>Year</th><th>Sex</th><th>ITR</th><th>Priority Score</th><th>Prediction</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="rank">#1</td><td class="name">Magno, Carlo</td><td class="mono">2024-00102</td>
+          <td>SPC Financial Aid Scholarship</td><td>₱85,000</td><td>96.40</td><td>3rd</td><td>Male</td>
+          <td><a class="vew">View ITR</a></td><td style="font-weight:700;color:#241012">83.75</td>
+          <td><span class="pred pred-high">High Need</span></td>
+        </tr>
+        <tr>
+          <td class="rank">#2</td><td class="name">Reyes, Ana</td><td class="mono">2024-00101</td>
+          <td>CHED Tulong Dunong Scholarship</td><td>₱150,000</td><td>68.40</td><td>3rd</td><td>Female</td>
+          <td><a class="vew">View ITR</a></td><td style="font-weight:700;color:#241012">80.00</td>
+          <td><span class="pred pred-high">High Need</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</main>
+
+</body>
+</html>

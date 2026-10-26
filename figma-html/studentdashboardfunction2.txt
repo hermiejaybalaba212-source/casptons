@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Student Dashboard — Function 2: View Available Scholarship Programs (3.0)</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Segoe UI',system-ui,Arial,sans-serif;background:#f9fafb;color:#111827;min-height:100vh}
+  /* ===== SIDEBAR (same shell) ===== */
+  aside{position:fixed;inset:0 auto 0 0;width:256px;z-index:50;display:flex;flex-direction:column;background:linear-gradient(to bottom,#1a1a2e,#16213e 55%,#0f3460);box-shadow:0 10px 30px rgba(0,0,0,.3)}
+  .sb-head{display:flex;align-items:center;gap:12px;height:64px;border-bottom:1px solid rgba(255,255,255,.1);padding:0 20px}
+  .sb-logo{width:36px;height:36px;flex:none;border-radius:8px;background:rgba(255,255,255,.1);color:#fff;font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .sb-title{font-size:14px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sb-sub{font-size:10px;color:rgba(255,255,255,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  nav.sb-nav{flex:1;overflow-y:auto;padding:16px 12px}
+  nav.sb-nav ul{list-style:none}
+  nav.sb-nav li{margin-bottom:4px}
+  .sb-item{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:12px;text-decoration:none;font-size:12px;font-weight:500;transition:.2s}
+  .sb-item .ic{width:28px;height:28px;flex:none;border-radius:8px;font-size:11px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.05);color:rgba(255,255,255,.5)}
+  .sb-item .tx{min-width:0;flex:1;line-height:1.3}
+  .sb-item .pf{flex:none;font-size:8px;font-weight:700;padding:2px 4px;border-radius:4px;background:rgba(255,255,255,.05);color:rgba(255,255,255,.3)}
+  .sb-item{color:rgba(255,255,255,.6)}
+  .sb-item:hover{background:rgba(255,255,255,.08);color:#fff}
+  .sb-item.active{background:rgba(255,255,255,.15);color:#fff;box-shadow:0 4px 12px rgba(0,0,0,.2)}
+  .sb-item.active .ic,.sb-item.active .pf{background:rgba(255,255,255,.2);color:#fff}
+  .sb-item:hover .ic{background:rgba(255,255,255,.1);color:rgba(255,255,255,.8)}
+  .sb-foot{border-top:1px solid rgba(255,255,255,.1);padding:16px}
+  .sb-user{display:flex;align-items:center;gap:12px}
+  .sb-avatar{width:36px;height:36px;flex:none;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .sb-uname{font-size:12px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sb-urole{font-size:10px;color:rgba(255,255,255,.4)}
+  .sb-icons{display:flex;gap:6px;margin-left:auto}
+  .sb-icon{position:relative;width:32px;height:32px;flex:none;border-radius:8px;background:none;border:none;color:rgba(255,255,255,.4);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.2s}
+  .sb-icon:hover{background:rgba(255,255,255,.1);color:#fff}
+  .bell-badge{position:absolute;top:-4px;right:-6px;height:16px;min-width:16px;padding:0 4px;border-radius:999px;background:#dc2626;color:#fff;font-size:8px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  /* ===== MAIN ===== */
+  main{margin-left:256px;padding:24px 32px;min-height:100vh}
+  .page-title{font-size:20px;font-weight:700;color:#111827}
+  .closed-note{border:1px solid #fcd34d;background:#fffbeb;color:#92400e;border-radius:12px;padding:12px 16px;font-size:12px;box-shadow:0 1px 3px rgba(0,0,0,.05);margin-top:16px}
+  /* program cards */
+  .grid{display:flex;flex-wrap:wrap;gap:16px;margin-top:16px}
+  .grid>.prog{flex:1 1 100%}
+  @media(min-width:640px){.grid>.prog{flex:1 1 calc(50% - 8px)}}
+  @media(min-width:1280px){.grid>.prog{flex:1 1 calc(33.333% - 10.67px)}}
+  .prog{display:flex;flex-direction:column;background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.05);transition:.2s}
+  .prog:hover{transform:translateY(-2px);box-shadow:0 6px 16px rgba(0,0,0,.08)}
+  .prog h3{font-size:14px;font-weight:700;color:#7B1113}
+  .prog .desc{margin-top:8px;font-size:12px;line-height:1.6;color:#4b5563;flex:1}
+  .prog .req{margin-top:8px;font-size:11px;color:#6b7280}
+  .prog .req b{font-weight:600}
+  .prog .dead{margin-top:12px;font-size:11px;color:#6b7280}
+  .prog .dead b{color:#111827}
+  .btn-apply{margin-top:16px;background:#7B1113;color:#fff;text-decoration:none;text-align:center;font-size:12px;font-weight:700;padding:10px 0;border-radius:8px;transition:.2s}
+  .btn-apply:hover{background:#540111}
+  .btn-closed{margin-top:16px;background:#9ca3af;color:#fff;text-align:center;font-size:12px;font-weight:700;padding:10px 0;border-radius:8px;cursor:not-allowed}
+</style>
+</head>
+<body>
+
+<!-- ===== SIDEBAR ===== -->
+<aside>
+  <div class="sb-head">
+    <div class="sb-logo">SPC</div>
+    <div style="min-width:0">
+      <p class="sb-title">St. Peter's College</p>
+      <p class="sb-sub">Student Portal</p>
+    </div>
+  </div>
+  <nav class="sb-nav">
+    <ul>
+      <li><a href="studentdashboardfunction1.txt" class="sb-item"><span class="ic">🔐</span><span class="tx">Login</span><span class="pf">2.0</span></a></li>
+      <li><a href="#" class="sb-item active"><span class="ic">📋</span><span class="tx">View Available Scholarship Programs</span><span class="pf">3.0</span></a></li>
+      <li><a href="studentdashboardfunction3.txt" class="sb-item"><span class="ic">📝</span><span class="tx">Submit / Apply Scholarships</span><span class="pf">4.0</span></a></li>
+      <li><a href="studentdashboardfunction4.txt" class="sb-item"><span class="ic">📈</span><span class="tx">Scholarships Status in Dashboard</span><span class="pf">5.0</span></a></li>
+      <li><a href="studentdashboardfunction5.txt" class="sb-item"><span class="ic">🔔</span><span class="tx">Received Notifications and Announcement</span><span class="pf">6.0</span></a></li>
+      <li><a href="studentdashboardfunction6.txt" class="sb-item"><span class="ic">⚠️</span><span class="tx">Early Warning Alerts Detection</span><span class="pf">7.0</span></a></li>
+      <li><a href="studentdashboardfunction7.txt" class="sb-item"><span class="ic">👤</span><span class="tx">Profile &amp; Documents</span></a></li>
+    </ul>
+  </nav>
+  <div class="sb-foot">
+    <div class="sb-user">
+      <div class="sb-avatar">AR</div>
+      <div style="min-width:0">
+        <p class="sb-uname">@ana.reyes</p>
+        <p class="sb-urole">Student</p>
+      </div>
+      <div class="sb-icons">
+        <button class="sb-icon" title="Notifications">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
+          <span class="bell-badge">2</span>
+        </button>
+        <button class="sb-icon" title="Log out">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<!-- ===== MAIN ===== -->
+<main>
+  <h1 class="page-title">Browse Available Programs</h1>
+
+  <div class="closed-note">You already have an approved scholarship application. Applications are closed for you.</div>
+
+  <!-- Program cards -->
+  <div class="grid">
+    <article class="prog">
+      <h3>SPC Merit Scholarship 2026</h3>
+      <p class="desc">A merit-based scholarship awarded to students who excel academically, based on their GWA.</p>
+      <p class="req"><b>Requirements:</b> COR, Valid ID, Signature Form, Academic Record</p>
+      <p class="dead">Deadline: <b>Sep 30, 2026</b></p>
+      <span class="btn-closed">Applications Closed</span>
+    </article>
+
+    <article class="prog">
+      <h3>CHED Tulong Dunong Scholarship</h3>
+      <p class="desc">Financial assistance program for qualified students in need, managed by the Commission on Higher Education.</p>
+      <p class="req"><b>Requirements:</b> COR, Valid ID, Signature Form, Academic Record, ITR</p>
+      <p class="dead">Deadline: <b>Oct 15, 2026</b></p>
+      <span class="btn-closed">Applications Closed</span>
+    </article>
+
+    <article class="prog">
+      <h3>SPC Academic Excellence Grant</h3>
+      <p class="desc">Waiver of tuition and fees for students who maintained an average of 93% and above during the previous term.</p>
+      <p class="req"><b>Requirements:</b> COR, Valid ID, Signature Form, Academic Record</p>
+      <p class="dead">Deadline: <b>Nov 05, 2026</b></p>
+      <span class="btn-closed">Applications Closed</span>
+    </article>
+
+    <article class="prog">
+      <h3>SPC Financial Aid Scholarship</h3>
+      <p class="desc">Need-based scholarship covering partial tuition based on declared family income from the ITR.</p>
+      <p class="req"><b>Requirements:</b> COR, Valid ID, Signature Form, Academic Record, ITR</p>
+      <p class="dead">Deadline: <b>Nov 20, 2026</b></p>
+      <span class="btn-closed">Applications Closed</span>
+    </article>
+  </div>
+</main>
+
+</body>
+</html>

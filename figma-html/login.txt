@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login — Scholarship System</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Segoe UI',system-ui,Arial,sans-serif;color:#241012;min-height:100vh}
+  .split{display:flex;min-height:100vh}
+  /* ===== LEFT MAROON PANEL ===== */
+  .aside{display:none;width:42%;background:linear-gradient(to bottom,#7B1113,#5A0C0E 55%,#3E0009);color:#fff;padding:40px;flex-direction:column;justify-content:space-between;position:relative;overflow:hidden}
+  @media(min-width:1280px){.aside{display:flex}}
+  .aside-deco-1{position:absolute;right:-96px;top:-96px;width:288px;height:288px;border-radius:50%;background:rgba(255,255,255,.05)}
+  .aside-deco-2{position:absolute;left:-64px;bottom:-128px;width:320px;height:320px;border-radius:50%;background:rgba(0,0,0,.2)}
+  .brand{position:relative;display:flex;align-items:center;gap:12px}
+  .brand p{line-height:1.3}
+  .brand .t1{font-size:18px;font-weight:700}
+  .brand .t2{font-size:12px;color:rgba(255,255,255,.7)}
+  .aside h1{margin-top:16px;font-size:30px;line-height:1.4;font-weight:700}
+  .aside .eyebrow{font-size:11px;font-weight:600;letter-spacing:.25em;text-transform:uppercase;color:rgba(255,255,255,.7)}
+  .feature-list{list-style:none;margin-top:28px;display:flex;flex-direction:column;gap:12px}
+  .feature-list li{display:flex;align-items:flex-start;gap:12px;font-size:14px;color:rgba(255,255,255,.85)}
+  .feature-list li em{font-style:normal;margin-top:2px;flex:none;width:20px;height:20px;border-radius:50%;background:rgba(255,255,255,.15);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700}
+  .aside foot{position:relative;font-size:12px;line-height:1.6;color:rgba(255,255,255,.6)}
+  /* ===== RIGHT FORM ===== */
+  .main{flex:1;display:flex;align-items:center;justify-content:center;background:#fff;padding:32px 16px}
+  .box{width:100%;max-width:448px}
+  .mobile-reg{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}
+  @media(min-width:1280px){.mobile-reg{display:none}}
+  .mobile-reg .brand-sm{font-weight:700;font-size:14px;color:#241012}
+  .mobile-reg .brand-sm small{display:block;font-size:10px;color:#6B5458;font-weight:400}
+  .link-reg{border:1px solid rgba(123,17,19,.3);color:#7B1113;background:none;font-size:12px;font-weight:600;padding:8px 12px;border-radius:8px;text-decoration:none;display:inline-block}
+  .pillars{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}
+  .pillar{border:1px solid rgba(123,17,19,.15);background:#FAF7F5;color:#7B1113;font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:4px 12px;border-radius:999px}
+  .box h2{margin-top:24px;text-align:center;font-size:24px;font-weight:700;color:#241012}
+  .box .sub{margin-top:8px;text-align:center;font-size:14px;color:#6B5458;line-height:1.6}
+  /* ===== ALERTS ===== */
+  .alert{margin-top:20px;border:1px solid #fecaca;background:#fef2f2;border-radius:12px;padding:12px 16px;font-size:14px;color:#b91c1c;display:none}
+  .alert.ok{border-color:#bbf7d0;background:#f0fdf4;color:#15803d;display:block}
+  .alert.err{border-color:#fecaca;background:#fef2f2;color:#b91c1c;display:block}
+  /* ===== FORM ===== */
+  form{margin-top:24px;display:flex;flex-direction:column;gap:16px}
+  .field label{display:block;margin-bottom:6px;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#540111}
+  .field .wrap-label{position:relative}
+  .field input{width:100%;border:1px solid rgba(123,17,19,.25);background:#fff;border-radius:12px;padding:12px 48px 12px 16px;font-size:14px;color:#241012;outline:none;box-sizing:border-box;transition:.15s}
+  .field input::placeholder{color:#8B7376;font-size:13px}
+  .field input:focus{border-color:#7B1113;box-shadow:0 0 0 4px rgba(123,17,19,.1)}
+  .eye{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:#8B7376;cursor:pointer;font-size:12px;font-weight:600}
+  .eye:hover{color:#7B1113}
+  .btn{margin-top:4px;width:100%;background:linear-gradient(to right,#7B1113,#540111);color:#fff;font-size:14px;font-weight:700;border:none;border-radius:12px;padding:18px 0;cursor:pointer;box-shadow:0 4px 12px rgba(123,17,19,.2);transition:.2s}
+  .btn:hover{filter:brightness(1.1)}
+  .btn:disabled{opacity:.6;cursor:not-allowed}
+  .alt{margin-top:20px;display:flex;align-items:center;justify-content:center;gap:6px;font-size:14px;flex-wrap:wrap}
+  .alt a,.alt button{color:#7B1113;font-weight:600;text-decoration:none;background:none;border:none;cursor:pointer}
+  .alt a:hover,.alt button:hover{text-decoration:underline}
+  .alt .dot{color:#8B7376}
+  .footnote{margin-top:32px;text-align:center;font-size:12px;color:#8B7376}
+</style>
+</head>
+<body>
+<div class="split">
+
+  <!-- LEFT PANEL -->
+  <aside class="aside">
+    <div class="aside-deco-1"></div>
+    <div class="aside-deco-2"></div>
+    <div class="brand">
+      <div>
+        <p class="t1">St. Peter&rsquo;s College</p>
+        <p class="t2">Iligan City</p>
+      </div>
+    </div>
+    <div>
+      <p class="eyebrow">ISEWM Scholarship System</p>
+      <h1>Intelligent Scholarship Application, Ranking &amp; Early-Warning Monitoring</h1>
+      <ul class="feature-list">
+        <li><em>&#10003;</em>Random Forest ranking prioritizing financial need</li>
+        <li><em>&#10003;</em>Records validated against the Registrar Information System</li>
+        <li><em>&#10003;</em>Automatic early-warning alerts below the 93% average</li>
+        <li><em>&#10003;</em>One portal for Students, Faculty, CHED and Administrators</li>
+      </ul>
+    </div>
+    <p class="foot">&copy; 2026 St. Peter&rsquo;s College &middot; Scholarship &amp; Financial Aid Office</p>
+  </aside>
+
+  <!-- RIGHT FORM -->
+  <main class="main">
+    <div class="box">
+      <div class="mobile-reg">
+        <div class="brand-sm">St. Peter&rsquo;s College<small>Scholarship System</small></div>
+        <a href="register.txt" class="link-reg">Register</a>
+      </div>
+
+      <div class="pillars">
+        <span class="pillar">Student</span>
+        <span class="pillar">Faculty</span>
+        <span class="pillar">CHED</span>
+        <span class="pillar">Administrator</span>
+      </div>
+
+      <h2>Welcome back!</h2>
+      <p class="sub">Log in with your email &mdash; you will be routed automatically by role.</p>
+
+      <div class="alert err" id="errBox">Invalid login credentials. Please try again.</div>
+      <div class="alert ok" id="okBox">Password updated successfully. You can now log in.</div>
+
+      <form id="loginForm">
+        <div class="field">
+          <label>Email Address</label>
+          <div class="wrap-label">
+            <input type="email" placeholder="e.g., student@gmail.com" value="maria.santos@student.spc.edu.ph">
+          </div>
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <div class="wrap-label">
+            <input type="password" placeholder="Enter your password" value="••••••••••" id="pw">
+            <button type="button" class="eye" onclick="togglePw()">Show</button>
+          </div>
+        </div>
+        <button type="submit" class="btn">Log In</button>
+      </form>
+
+      <div class="alt">
+        <button type="button">Forgot password?</button>
+        <span class="dot">&middot;</span>
+        <span style="color:#6B5458">No account yet?</span>
+        <a href="register.txt">Register</a>
+      </div>
+
+      <p class="footnote">Protected by St. Peter&rsquo;s College &middot; ISEWM Scholarship System</p>
+    </div>
+  </main>
+
+</div>
+<script>
+  function togglePw(){
+    var el=document.getElementById('pw');
+    var btn=event.currentTarget;
+    if(el.type==='password'){el.type='text';btn.textContent='Hide';}
+    else{el.type='password';btn.textContent='Show';}
+  }
+  document.getElementById('loginForm').addEventListener('submit',function(e){
+    e.preventDefault();
+    document.getElementById('errBox').style.display='block';
+  });
+</script>
+</body>
+</html>

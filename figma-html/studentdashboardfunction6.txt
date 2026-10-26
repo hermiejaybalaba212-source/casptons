@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Student Dashboard — Function 6: Early Warning Alerts (7.0)</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Segoe UI',system-ui,Arial,sans-serif;background:#f9fafb;color:#111827;min-height:100vh}
+  /* ===== SIDEBAR SHELL ===== */
+  aside{position:fixed;inset:0 auto 0 0;width:256px;z-index:50;display:flex;flex-direction:column;background:linear-gradient(to bottom,#1a1a2e,#16213e 55%,#0f3460);box-shadow:0 10px 30px rgba(0,0,0,.3)}
+  .sb-head{display:flex;align-items:center;gap:12px;height:64px;border-bottom:1px solid rgba(255,255,255,.1);padding:0 20px}
+  .sb-logo{width:36px;height:36px;flex:none;border-radius:8px;background:rgba(255,255,255,.1);color:#fff;font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .sb-title{font-size:14px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sb-sub{font-size:10px;color:rgba(255,255,255,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  nav.sb-nav{flex:1;overflow-y:auto;padding:16px 12px}
+  nav.sb-nav ul{list-style:none}
+  nav.sb-nav li{margin-bottom:4px}
+  .sb-item{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:12px;text-decoration:none;font-size:12px;font-weight:500;transition:.2s}
+  .sb-item .ic{width:28px;height:28px;flex:none;border-radius:8px;font-size:11px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.05);color:rgba(255,255,255,.5)}
+  .sb-item .tx{min-width:0;flex:1;line-height:1.3}
+  .sb-item .pf{flex:none;font-size:8px;font-weight:700;padding:2px 4px;border-radius:4px;background:rgba(255,255,255,.05);color:rgba(255,255,255,.3)}
+  .sb-item{color:rgba(255,255,255,.6)}
+  .sb-item:hover{background:rgba(255,255,255,.08);color:#fff}
+  .sb-item.active{background:rgba(255,255,255,.15);color:#fff;box-shadow:0 4px 12px rgba(0,0,0,.2)}
+  .sb-item.active .ic,.sb-item.active .pf{background:rgba(255,255,255,.2);color:#fff}
+  .sb-item:hover .ic{background:rgba(255,255,255,.1);color:rgba(255,255,255,.8)}
+  .sb-foot{border-top:1px solid rgba(255,255,255,.1);padding:16px}
+  .sb-user{display:flex;align-items:center;gap:12px}
+  .sb-avatar{width:36px;height:36px;flex:none;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .sb-uname{font-size:12px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sb-urole{font-size:10px;color:rgba(255,255,255,.4)}
+  .sb-icons{display:flex;gap:6px;margin-left:auto}
+  .sb-icon{position:relative;width:32px;height:32px;flex:none;border-radius:8px;background:none;border:none;color:rgba(255,255,255,.4);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.2s}
+  .sb-icon:hover{background:rgba(255,255,255,.1);color:#fff}
+  .bell-badge{position:absolute;top:-4px;right:-6px;height:16px;min-width:16px;padding:0 4px;border-radius:999px;background:#dc2626;color:#fff;font-size:8px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  /* ===== MAIN ===== */
+  main{margin-left:256px;padding:24px 32px;min-height:100vh;max-width:900px}
+  .page-title{font-size:20px;font-weight:700;color:#111827}
+  .badge{display:inline-flex;align-items:center;border:1px solid;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:600}
+  .b-red{border-color:#fecaca;background:#fef2f2;color:#dc2626}
+  .b-green{border-color:#a7f3d0;background:#ecfdf5;color:#047857}
+  /* alert card */
+  .alert-card{border:1px solid #fecaca;background:#fef2f2;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.05);margin-top:12px}
+  .alert-card.resolved{border-color:#bbf7d0;background:#f0fdf4}
+  .alert-top{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+  .risk{font-size:12px;font-weight:700;color:#b91c1c}
+  .risk.low{color:#047857}
+  .date{margin-left:auto;font-size:11px;color:#6b7280}
+  .semi{font-size:11px;font-weight:600;color:#6b7280;background:rgba(123,17,19,.08);padding:2px 8px;border-radius:999px}
+  .alert-msg{margin-top:8px;font-size:12px;line-height:1.6;color:#1f2937}
+  .alert-meta{margin-top:8px;display:flex;gap:16px;font-size:12px;color:#4b5563;flex-wrap:wrap}
+  .alert-meta strong{font-weight:700}
+  .overview{display:flex;flex-wrap:wrap;gap:12px;margin-top:16px}
+  .overview>.card-sm{flex:1 1 calc(33.333% - 8px)}
+  @media(max-width:640px){.overview>.card-sm{flex:1 1 100%}}
+  .card-sm{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+  .card-sm .lb{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#6b7280}
+  .card-sm .vl{margin-top:6px;font-size:20px;font-weight:700;color:#111827}
+</style>
+</head>
+<body>
+
+<!-- ===== SIDEBAR ===== -->
+<aside>
+  <div class="sb-head">
+    <div class="sb-logo">SPC</div>
+    <div style="min-width:0">
+      <p class="sb-title">St. Peter's College</p>
+      <p class="sb-sub">Student Portal</p>
+    </div>
+  </div>
+  <nav class="sb-nav">
+    <ul>
+      <li><a href="studentdashboardfunction1.txt" class="sb-item"><span class="ic">🔐</span><span class="tx">Login</span><span class="pf">2.0</span></a></li>
+      <li><a href="studentdashboardfunction2.txt" class="sb-item"><span class="ic">📋</span><span class="tx">View Available Scholarship Programs</span><span class="pf">3.0</span></a></li>
+      <li><a href="studentdashboardfunction3.txt" class="sb-item"><span class="ic">📝</span><span class="tx">Submit / Apply Scholarships</span><span class="pf">4.0</span></a></li>
+      <li><a href="studentdashboardfunction4.txt" class="sb-item"><span class="ic">📈</span><span class="tx">Scholarships Status in Dashboard</span><span class="pf">5.0</span></a></li>
+      <li><a href="studentdashboardfunction5.txt" class="sb-item"><span class="ic">🔔</span><span class="tx">Received Notifications and Announcement</span><span class="pf">6.0</span></a></li>
+      <li><a href="#" class="sb-item active"><span class="ic">⚠️</span><span class="tx">Early Warning Alerts Detection</span><span class="pf">7.0</span></a></li>
+      <li><a href="studentdashboardfunction7.txt" class="sb-item"><span class="ic">👤</span><span class="tx">Profile &amp; Documents</span></a></li>
+    </ul>
+  </nav>
+  <div class="sb-foot">
+    <div class="sb-user">
+      <div class="sb-avatar">AR</div>
+      <div style="min-width:0">
+        <p class="sb-uname">@ana.reyes</p>
+        <p class="sb-urole">Student</p>
+      </div>
+      <div class="sb-icons">
+        <button class="sb-icon" title="Notifications"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg><span class="bell-badge">2</span></button>
+        <button class="sb-icon" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg></button>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<!-- ===== MAIN ===== -->
+<main>
+  <h1 class="page-title">Early Warning Alerts Detection</h1>
+  <p style="margin-top:4px;font-size:12px;color:#6b7280">Automatically triggered when your average grade falls below the 93% maintaining average.</p>
+
+  <div class="overview">
+    <div class="card-sm"><div class="lb">Active Alerts</div><div class="vl" style="color:#dc2626">1</div></div>
+    <div class="card-sm"><div class="lb">Resolved Alerts</div><div class="vl" style="color:#047857">1</div></div>
+    <div class="card-sm"><div class="lb">Current Average</div><div class="vl">68.75%</div></div>
+  </div>
+
+  <!-- ACTIVE ALERT -->
+  <div class="alert-card">
+    <div class="alert-top">
+      <span class="badge b-red">Active</span>
+      <span class="risk">Risk: High</span>
+      <span class="semi">Below 93% average</span>
+      <span class="date">Aug 26, 2026 03:10 PM</span>
+    </div>
+    <p class="alert-msg">Your average grade (68.75%) fell below the 93% maintaining average required to keep your scholarship. Please contact your adviser or the Scholarship Office for an intervention plan.</p>
+    <div class="alert-meta">
+      <span>GPA: <strong>2.25</strong></span>
+      <span>Average: <strong>68.75%</strong></span>
+      <span>102.25 units attempted</span>
+    </div>
+  </div>
+
+  <!-- RESOLVED ALERT -->
+  <div class="alert-card resolved">
+    <div class="alert-top">
+      <span class="badge b-green">Resolved</span>
+      <span class="risk low">Risk: Low</span>
+      <span class="semi">Back above 93%</span>
+      <span class="date">Jul 15, 2026 11:20 AM</span>
+    </div>
+    <p class="alert-msg">Your average grade returned above the 93% maintaining average after the second semester. Alert closed.</p>
+    <div class="alert-meta">
+      <span>GPA: <strong>1.42</strong></span>
+      <span>Average: <strong>94.50%</strong></span>
+    </div>
+  </div>
+</main>
+
+</body>
+</html>

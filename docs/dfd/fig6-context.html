@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #fff; }
+  #page { position: relative; width: 1344px; height: 881px; background: #fff;
+          font-family: Arial, Helvetica, sans-serif; overflow: hidden; }
+  .ent { position: absolute; background: #fff; border: 1.5px solid #000;
+         display: flex; align-items: center; justify-content: center;
+         font-size: 18px; color: #000; z-index: 3; }
+  .proc { position: absolute; background: #fff; border: 3px solid #000;
+          border-radius: 24px; z-index: 3; }
+  .pnum { position: absolute; left: 0; right: 0; text-align: center;
+          font-size: 20px; line-height: 20px; }
+  .psep { position: absolute; left: -3px; right: 0; border-top: 2px solid #000; }
+  .ptitle { position: absolute; left: 0; right: 0; text-align: center;
+            font-size: 17px; font-weight: bold; line-height: 20px;
+            white-space: nowrap; }
+  .lbl { position: absolute; background: #fff; border: none;
+         padding: 0 3px; font-size: 13px; line-height: 16px; color: #000;
+         white-space: nowrap; text-align: center; z-index: 4; }
+  svg#lines { position: absolute; left: 0; top: 0; z-index: 2; }
+</style>
+</head>
+<body>
+<div id="page">
+
+  <svg id="lines" width="1344" height="881">
+    <defs>
+      <marker id="arr" markerUnits="userSpaceOnUse" markerWidth="11" markerHeight="10"
+              refX="10" refY="5" orient="auto">
+        <path d="M0,0 L10,5 L0,10 Z" fill="#000"/>
+      </marker>
+    </defs>
+    <g stroke="#000" stroke-width="1.5" fill="none">
+      <!-- STUDENTS -->
+      <polyline points="583,333 87,333 87,394" marker-end="url(#arr)"/>
+      <polyline points="559,371 125,371 125,394" marker-end="url(#arr)"/>
+      <polyline points="162,394 559,394" marker-end="url(#arr)"/>
+      <polyline points="162,406 559,406" marker-end="url(#arr)"/>
+      <polyline points="162,431 559,431" marker-end="url(#arr)"/>
+      <polyline points="162,456 559,456" marker-end="url(#arr)"/>
+      <polyline points="162,469 162,481 559,481" marker-end="url(#arr)"/>
+      <polyline points="125,469 125,500 559,500" marker-end="url(#arr)"/>
+      <polyline points="87,469 87,518 559,518" marker-end="url(#arr)"/>
+      <!-- CHED -->
+      <polyline points="598,71 423,71 423,220 510,220 510,320 578,320 578,332" marker-end="url(#arr)"/>
+      <polyline points="535,108 535,307 598,307 598,332" marker-end="url(#arr)"/>
+      <polyline points="622,108 622,332" marker-end="url(#arr)"/>
+      <polyline points="710,108 710,332" marker-end="url(#arr)"/>
+      <polyline points="747,90 846,90 846,295 738,295 738,332" marker-end="url(#arr)"/>
+      <polyline points="758,332 758,320 971,320 971,46 747,46" marker-end="url(#arr)"/>
+      <polyline points="786,351 996,351 996,31 716,31 716,34" marker-end="url(#arr)"/>
+      <!-- ADMIN -->
+      <polyline points="1220,406 1220,359 786,359" marker-end="url(#arr)"/>
+      <polyline points="786,369 1182,369 1182,406" marker-end="url(#arr)"/>
+      <polyline points="1108,407 786,407" marker-end="url(#arr)"/>
+      <polyline points="1108,431 786,431" marker-end="url(#arr)"/>
+      <polyline points="1115,481 1115,492 786,492" marker-end="url(#arr)"/>
+      <polyline points="1182,481 1182,531 786,531" marker-end="url(#arr)"/>
+      <polyline points="1220,481 1220,556 786,556" marker-end="url(#arr)"/>
+      <polyline points="759,557 759,580 1257,580 1257,481" marker-end="url(#arr)"/>
+      <polyline points="1257,462 1282,462 1282,593 747,593 747,554" marker-end="url(#arr)"/>
+      <polyline points="728,556 728,618 1319,618 1319,444 1257,444" marker-end="url(#arr)"/>
+      <!-- FACULTY -->
+      <polyline points="610,556 610,792" marker-end="url(#arr)"/>
+      <polyline points="650,556 650,581 709,581 709,792" marker-end="url(#arr)"/>
+      <polyline points="559,556 461,556 461,810 597,810" marker-end="url(#arr)"/>
+      <polyline points="597,829 373,829 373,535 559,535" marker-end="url(#arr)"/>
+    </g>
+  </svg>
+
+  <!-- entities -->
+  <div class="ent" style="left:13px;top:394px;width:149px;height:75px;">STUDENTS</div>
+  <div class="ent" style="left:597px;top:34px;width:150px;height:74px;">CHED</div>
+  <div class="ent" style="left:1108px;top:406px;width:149px;height:75px;">ADMIN</div>
+  <div class="ent" style="left:597px;top:792px;width:150px;height:74px;">FACULTY</div>
+
+  <!-- process 0 -->
+  <div class="proc" style="left:559px;top:332px;width:228px;height:225px;">
+    <div class="pnum" style="top:17px;">0</div>
+    <div class="psep" style="top:52px;"></div>
+    <div class="ptitle" style="top:66px;">Intelligent Scholarship</div>
+    <div class="ptitle" style="top:92px;">Application, Ranking, and</div>
+    <div class="ptitle" style="top:116px;">Early-Warning Monitoring</div>
+    <div class="ptitle" style="top:135px;">System HEIs</div>
+  </div>
+
+  <!-- STUDENTS labels -->
+  <div class="lbl" style="left:317px;top:336px;transform:translate(-50%,-50%);">RECEIVE NOTIFICATIONS AND ANNOUNCEMENTS</div>
+  <div class="lbl" style="left:342px;top:374px;transform:translate(-50%,-50%);">RECEIVE EARLY WARNING ALERTS</div>
+  <div class="lbl" style="left:311px;top:391px;transform:translate(-50%,-50%);">SUBMIT INCOME TAX RETURN (ITR)</div>
+  <div class="lbl" style="left:346px;top:407px;transform:translate(-50%,-50%);">LOGIN</div>
+  <div class="lbl" style="left:350px;top:433px;transform:translate(-50%,-50%);">SUBMIT/APPLY SCHOLARSHIP APPLICATIONS</div>
+  <div class="lbl" style="left:334px;top:457px;transform:translate(-50%,-50%);">VIEW AVAILABLE SCHOLARSHIP PROGRAMS</div>
+  <div class="lbl" style="left:362px;top:482px;transform:translate(-50%,-50%);">REGISTER</div>
+  <div class="lbl" style="left:283px;top:499px;transform:translate(-50%,-50%);">VIEW SCHOLARSHIP STATUS IN DASHBOARD</div>
+  <div class="lbl" style="left:255px;top:520px;transform:translate(-50%,-50%);">UPLOAD SUPPORT DOCUMENTS/ACADEMIC RECORDS</div>
+
+  <!-- CHED labels -->
+  <div class="lbl" style="left:486px;top:76px;transform:translate(-50%,-50%);">LOGIN</div>
+  <div class="lbl" style="left:524px;top:146px;transform:translate(-50%,-50%);">MANAGE SCHOLARSHIP<br>APPLICATIONS</div>
+  <div class="lbl" style="left:624px;top:220px;transform:translate(-50%,-50%);">FILTER APPROVE<br>SCHOLARSHIPS<br>AND EXPORT</div>
+  <div class="lbl" style="left:723px;top:161px;transform:translate(-50%,-50%);">VIEW<br>PRIORITIZED<br>APPLICANTS BASED ON ML<br>RANKING RESULT LIST</div>
+  <div class="lbl" style="left:848px;top:234px;transform:translate(-50%,-50%);">SEND BACK FINAL APPROVED<br>LIST TO ADMIN</div>
+  <div class="lbl" style="left:884px;top:48px;transform:translate(-50%,-50%);">RECEIVE APPLICATIONS DATA</div>
+  <div class="lbl" style="left:873px;top:23px;transform:translate(-50%,-50%);">RECEIVE APPLICATIONS RANKING LIST</div>
+
+  <!-- ADMIN labels -->
+  <div class="lbl" style="left:1148px;top:351px;transform:translate(-50%,-50%);">MANAGE SCHOLARSHIP PROGRAMS</div>
+  <div class="lbl" style="left:990px;top:374px;transform:translate(-50%,-50%);">RECEIVE APPLICATION DATA</div>
+  <div class="lbl" style="left:980px;top:406px;transform:translate(-50%,-50%);">VIEW AND EXPORT RANKING RESULTS</div>
+  <div class="lbl" style="left:971px;top:431px;transform:translate(-50%,-50%);">RUN MACHINE LEARNING RANKING</div>
+  <div class="lbl" style="left:957px;top:498px;transform:translate(-50%,-50%);">EXPORT APPLICATION DATA</div>
+  <div class="lbl" style="left:997px;top:530px;transform:translate(-50%,-50%);">USER MANAGEMENT AND<br>CREATE FACULTY ACCOUNTS</div>
+  <div class="lbl" style="left:1002px;top:559px;transform:translate(-50%,-50%);">VIEW AND EXPORT VALIDATED APPROVED APPLICANTS</div>
+  <div class="lbl" style="left:995px;top:581px;transform:translate(-50%,-50%);">RECEIVE SCHOLARSHIP STATUS UPDATES AND NOTIFICATIONS</div>
+  <div class="lbl" style="left:1245px;top:596px;transform:translate(-50%,-50%);">LOGIN</div>
+  <div class="lbl" style="left:1012px;top:617px;transform:translate(-50%,-50%);">RECEIVE FILTERED FINAL APPROVED SCHOLARSHIP LIST FROM CHED</div>
+
+  <!-- FACULTY labels -->
+  <div class="lbl" style="left:612px;top:651px;transform:translate(-50%,-50%);">PROVIDE INTERVENTION<br>SUPPORT TO STUDENTS</div>
+  <div class="lbl" style="left:721px;top:719px;transform:translate(-50%,-50%);">RECEIVE EARLY WARNING<br>ALERTS</div>
+  <div class="lbl" style="left:485px;top:723px;transform:translate(-50%,-50%);">RECEIVE FINAL APPROVED<br>SCHOLARSHIP LIST AND<br>EXPORT</div>
+  <div class="lbl" style="left:481px;top:831px;transform:translate(-50%,-50%);">LOGIN</div>
+
+</div>
+</body>
+</html>

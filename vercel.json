@@ -1,0 +1,34 @@
+{
+  "services": {
+    "app": {
+      "root": ".",
+      "framework": "nextjs",
+      "bindings": [
+        {
+          "type": "service",
+          "service": "ml",
+          "format": "url",
+          "env": "ML_URL"
+        }
+      ]
+    },
+    "ml": {
+      "root": "ml",
+      "framework": "fastapi",
+      "entrypoint": "service:app",
+      "buildCommand": "(uv pip uninstall opencv-python || python -m pip uninstall -y opencv-python); (uv pip install --no-deps opencv-python-headless || python -m pip install --no-deps opencv-python-headless)",
+      "functions": {
+        "service.py": {
+          "maxDuration": 300,
+          "excludeFiles": "{**/tests/**,**/test/**,**/testing/**,**/doc/**,**/docs/**,**/examples/**,**/benchmarks/**,**/__pycache__/**,**/*.pyc}"
+        }
+      }
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": { "service": "app" }
+    }
+  ]
+}

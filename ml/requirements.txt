@@ -1,0 +1,30 @@
+# ISEWM Scholarship System - OCR + Random Forest ranking pipeline
+# Local: Python 3.14.3 (C:\Program Files\Python314\python.exe)
+# Vercel ml service: Python 3.12 (linux) - Windows-only packages are skipped there.
+#
+#   py -3 -m pip install -r ml\requirements.txt
+#
+# Install onnxruntime-directml LAST on Windows: it replaces the stock
+# onnxruntime runtime files so RapidOCR runs on the GPU (DmlExecutionProvider).
+
+numpy==2.5.3 ; sys_platform == "win32"
+numpy>=1.26,<3 ; sys_platform != "win32"
+scipy==1.18.1 ; sys_platform == "win32"
+scipy>=1.11 ; sys_platform != "win32"
+pillow==12.3.0 ; sys_platform == "win32"
+pillow>=10 ; sys_platform != "win32"
+scikit-learn==1.9.1 ; sys_platform == "win32"
+scikit-learn>=1.4 ; sys_platform != "win32"
+joblib==1.6.0
+opencv-python==5.0.0.93 ; sys_platform == "win32"
+opencv-python-headless>=4.10 ; sys_platform != "win32"
+rapidocr-onnxruntime==1.2.3
+onnxruntime-directml==1.24.4 ; sys_platform == "win32"
+onnxruntime>=1.20 ; sys_platform != "win32"
+
+# HTTP service entrypoint (ml/service.py) - Vercel Python runtime
+fastapi>=0.115
+uvicorn>=0.34
+
+# Excel training-data support (ml/training_data.xlsx)
+openpyxl>=3.1

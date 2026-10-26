@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Faculty Monitoring Console — Function 2: Early Warning Alerts Detection (2.0)</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:'Segoe UI',system-ui,Arial,sans-serif;background:#f9fafb;color:#111827;min-height:100vh}
+  /* ===== FACULTY SIDEBAR SHELL ===== */
+  aside{position:fixed;inset:0 auto 0 0;width:256px;z-index:50;display:flex;flex-direction:column;background:linear-gradient(to bottom,#1a1a2e,#16213e 55%,#0f3460);box-shadow:0 10px 30px rgba(0,0,0,.3)}
+  .sb-head{display:flex;align-items:center;gap:12px;height:64px;border-bottom:1px solid rgba(255,255,255,.1);padding:0 20px}
+  .sb-logo{width:36px;height:36px;flex:none;border-radius:8px;background:rgba(255,255,255,.1);color:#fff;font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .sb-title{font-size:14px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sb-sub{font-size:10px;color:rgba(255,255,255,.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  nav.sb-nav{flex:1;overflow-y:auto;padding:16px 12px}
+  nav.sb-nav ul{list-style:none}
+  nav.sb-nav li{margin-bottom:4px}
+  .sb-item{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:12px;text-decoration:none;font-size:12px;font-weight:500;transition:.2s}
+  .sb-item .ic{width:28px;height:28px;flex:none;border-radius:8px;font-size:11px;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,.05);color:rgba(255,255,255,.5)}
+  .sb-item .tx{min-width:0;flex:1;line-height:1.3}
+  .sb-item .pf{flex:none;font-size:8px;font-weight:700;padding:2px 4px;border-radius:4px;background:rgba(255,255,255,.05);color:rgba(255,255,255,.3)}
+  .sb-item{color:rgba(255,255,255,.6)}
+  .sb-item:hover{background:rgba(255,255,255,.08);color:#fff}
+  .sb-item.active{background:rgba(255,255,255,.15);color:#fff;box-shadow:0 4px 12px rgba(0,0,0,.2)}
+  .sb-item.active .ic,.sb-item.active .pf{background:rgba(255,255,255,.2);color:#fff}
+  .sb-item:hover .ic{background:rgba(255,255,255,.1);color:rgba(255,255,255,.8)}
+  .sb-foot{border-top:1px solid rgba(255,255,255,.1);padding:16px}
+  .sb-user{display:flex;align-items:center;gap:12px}
+  .sb-avatar{width:36px;height:36px;flex:none;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .sb-uname{font-size:12px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sb-urole{font-size:10px;color:rgba(255,255,255,.4)}
+  .sb-icons{display:flex;gap:6px;margin-left:auto}
+  .sb-icon{position:relative;width:32px;height:32px;flex:none;border-radius:8px;background:none;border:none;color:rgba(255,255,255,.4);cursor:pointer;display:flex;align-items:center;justify-content:center;transition:.2s}
+  .sb-icon:hover{background:rgba(255,255,255,.1);color:#fff}
+  .bell-badge{position:absolute;top:-4px;right:-6px;height:16px;min-width:16px;padding:0 4px;border-radius:999px;background:#dc2626;color:#fff;font-size:8px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  /* ===== MAIN ===== */
+  main{margin-left:256px;padding:24px 32px;min-height:100vh}
+  .page-title{font-size:20px;font-weight:700;color:#241012}
+  .page-hint{font-size:12px;color:#6b7280;margin-top:4px}
+  .scanner{display:flex;align-items:center;gap:12px;margin-top:16px}
+  .btn-scan{background:#166534;color:#fff;border:none;font-size:12px;font-weight:700;padding:10px 16px;border-radius:10px;cursor:pointer}
+  .btn-scan:hover{background:#14532d}
+  .scan-msg{font-size:12px;color:#4b5563}
+  .section-title{font-size:14px;font-weight:700;color:#241012;margin-top:20px;margin-bottom:8px}
+  .alert{background:#fff;border-radius:12px;padding:16px;box-shadow:0 1px 3px rgba(0,0,0,.05);margin-bottom:10px}
+  .alert.active{background:#fef2f2;border:1px solid #fecaca}
+  .alert.resolved{background:#fff;border:1px solid #e5e7eb}
+  .al-top{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+  .al-name{font-size:13px;font-weight:700;color:#241012}
+  .al-name .sub{font-weight:400;color:#9ca3af;margin-left:4px}
+  .al-date{margin-left:auto;font-size:10px;color:#9ca3af}
+  .al-msg{font-size:12px;color:#4b5563;margin-top:8px}
+  .al-meta{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-top:8px;font-size:11px}
+  .al-avg{font-weight:700}
+  .al-avg.red{color:#b91c1c}
+  .al-avg.green{color:#16a34a}
+  .al-prog{color:#9ca3af}
+  .btn-interv{display:inline-block;margin-top:12px;background:#166534;color:#fff;border:none;font-size:12px;font-weight:700;padding:10px 16px;border-radius:10px;cursor:pointer;text-decoration:none}
+  .btn-interv:hover{background:#14532d}
+  .badge{display:inline-flex;align-items:center;border:1px solid;border-radius:999px;padding:2px 10px;font-size:11px;font-weight:600;white-space:nowrap}
+  .b-active{border-color:#fecaca;background:#fef2f2;color:#b91c1c}
+  .b-resolved{border-color:#a7f3d0;background:#ecfdf5;color:#047857}
+  .b-risk{border-color:#fecaca;background:#fef2f2;color:#b91c1c}
+  .b-risk-l{border-color:#fed7aa;background:#fff7ed;color:#ea580c}
+  .b-risk-m{border-color:#fde68a;background:#fffbeb;color:#b45309}
+  .b-risk-gray{border-color:#e5e7eb;background:#f9fafb;color:#4b5563}
+  .empty{color:#9ca3af;font-size:12px;text-align:center;padding:16px}
+</style>
+</head>
+<body>
+
+<!-- ===== SIDEBAR ===== -->
+<aside>
+  <div class="sb-head">
+    <div class="sb-logo">SPC</div>
+    <div style="min-width:0">
+      <p class="sb-title">St. Peter's College</p>
+      <p class="sb-sub">Faculty Monitoring Console</p>
+    </div>
+  </div>
+  <nav class="sb-nav">
+    <ul>
+      <li><a href="facultydashboardfunction1.txt" class="sb-item"><span class="ic">🔐</span><span class="tx">Login</span><span class="pf">1.0</span></a></li>
+      <li><a href="facultydashboardfunction2.txt" class="sb-item active"><span class="ic">⚠️</span><span class="tx">Early Warning Alerts Detection</span><span class="pf">2.0</span></a></li>
+      <li><a href="facultydashboardfunction3.txt" class="sb-item"><span class="ic">💬</span><span class="tx">Intervention to Students</span><span class="pf">3.0</span></a></li>
+      <li><a href="facultydashboardfunction4.txt" class="sb-item"><span class="ic">🏆</span><span class="tx">Scholarships Approval List</span><span class="pf">4.0</span></a></li>
+    </ul>
+  </nav>
+  <div class="sb-foot">
+    <div class="sb-user">
+      <div class="sb-avatar">F</div>
+      <div style="min-width:0">
+        <p class="sb-uname">@faculty</p>
+        <p class="sb-urole">Faculty</p>
+      </div>
+      <div class="sb-icons">
+        <a class="sb-icon" href="facultydashboardfunction2.txt" title="Notifications"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg><span class="bell-badge">1</span></a>
+        <button class="sb-icon" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/></svg></button>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<!-- ===== MAIN ===== -->
+<main>
+  <div>
+    <h1 class="page-title">Early Warning Alerts</h1>
+    <p class="page-hint">Process 2.0 &mdash; Monitor students whose grades have fallen below the 93% maintenance threshold.</p>
+  </div>
+
+  <div class="scanner">
+    <button class="btn-scan">Scan Registrar Grades</button>
+    <span class="scan-msg">Scan complete. 1 new early warning alert(s) created for students below 93%.</span>
+  </div>
+
+  <div>
+    <p class="section-title">Active Alerts (1)</p>
+    <div class="alert active">
+      <div class="al-top">
+        <span class="al-name">Reyes, Ana <span class="sub">(2024-00101)</span></span>
+        <span class="badge b-active">Active</span>
+        <span class="badge b-risk">High risk</span>
+        <span class="al-date">Aug 26, 2026 03:10 PM</span>
+      </div>
+      <p class="al-msg">Academic average of 68.8% is below the 93% maintaining grade requirement.</p>
+      <div class="al-meta">
+        <span class="al-avg red">Average: 68.75%</span>
+        <span class="al-prog">BSIT &middot; 3rd Year</span>
+      </div>
+      <a class="btn-interv" href="facultydashboardfunction3.txt">Send intervention &rarr;</a>
+    </div>
+  </div>
+
+  <div>
+    <p class="section-title">Resolved (1)</p>
+    <div class="alert resolved">
+      <div class="al-top">
+        <span class="al-name">Magno, Carlo <span class="sub">(2024-00102)</span></span>
+        <span class="badge b-resolved">Resolved</span>
+        <span class="badge b-risk-gray">Medium risk</span>
+        <span class="al-date">Aug 18, 2026 10:05 AM</span>
+      </div>
+      <p class="al-msg">Academic average of 68.8% is below the 93% maintaining grade requirement.</p>
+      <div class="al-meta">
+        <span class="al-avg green">Average: 94.30%</span>
+        <span class="al-prog">BSIT &middot; 2nd Year</span>
+      </div>
+    </div>
+  </div>
+</main>
+
+</body>
+</html>
