@@ -441,11 +441,33 @@ export default function MLRankingPage() {
 
   async function viewItr(itrPath: string) {
     const sb = getSupabase();
+    // 1) Normal signing - works for buckets that have a storage read policy
+    //    for the logged-in user.
     const { data, error: err } = await sb.storage.from("itr-documents").createSignedUrl(itrPath, 3600);
     if (data?.signedUrl) {
       window.open(data.signedUrl, "_blank");
-    } else {
-      setError(err?.message || "Could not open ITR file.");
+      return;
+    }
+    // 2) The itr-documents bucket has no SELECT policy, so the user's key gets
+    //    404 "Object not found" even though the file is really there (the OCR
+    //    pipeline reads it fine because it uses the service key). Fall back to
+    //    the server route, which signs with the service key - same workaround
+    //    the Documents Viewer already uses.
+    try {
+      const res = await fetch("/api/storage/signed-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bucket: "itr-documents", paths: [itrPath] }),
+      });
+      const payload = (await res.json()) as { urls?: Record<string, string>; error?: string };
+      const url = payload.urls?.[itrPath];
+      if (res.ok && url) {
+        window.open(url, "_blank");
+        return;
+      }
+      setError(payload.error || err?.message || "Could not open the ITR file.");
+    } catch {
+      setError(err?.message || "Could not open the ITR file.");
     }
   }
 
@@ -983,21 +1005,30 @@ export default function MLRankingPage() {
 
   return (
     <div className="space-y-4">
-      <div className="overflow-hidden rounded-2xl border border-[#7B1113]/20 bg-gradient-to-r from-[#7B1113] via-[#8E1518] to-[#A31A22] px-5 py-4 text-white shadow-sm">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded-full bg-white/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider ring-1 ring-white/25">
-            Machine Learning
-          </span>
-          <span className="rounded-full bg-white/10 px-2.5 py-1 text-[10px] font-semibold tracking-wide ring-1 ring-white/20">
-            OCR &middot; scikit-learn &middot; Supabase
-          </span>
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-[#241012]">Machine Learning Ranking</h1>
+          <p className="mt-1 text-xs text-[#8B7376]">
+            OCR &middot; scikit-learn &middot; Supabase &mdash; scans every ITR, then ranks the applicants.
+          </p>
         </div>
-        <h1 className="mt-2 text-xl font-bold tracking-tight">AI OCR + Random Forest Ranking</h1>
-        <p className="mt-1 max-w-3xl text-xs leading-relaxed text-white/85">
-          Every uploaded ITR is read with OCR and checked against the income the applicant typed. The scanned
-          ITR figure is what the Random Forest ranks on (typed income is only used when OCR finds nothing),
-          so <span className="font-bold text-white">Rank 1 = highest priority = most in need of financial assistance</span>.
-        </p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={exportChedFormsCsv}
+            disabled={!chedForms.length}
+            className="rounded-xl border border-[#7B1113]/30 px-4 py-2.5 text-xs font-bold text-[#7B1113] transition hover:bg-[#7B1113]/5 disabled:opacity-40"
+          >
+            &#11015; Export CHED Forms CSV
+          </button>
+          <button
+            onClick={deleteSavedRanking}
+            disabled={savedBusy || !savedCount}
+            className="rounded-xl border border-red-200 px-4 py-2.5 text-xs font-bold text-red-600 transition hover:bg-red-50 disabled:opacity-40"
+            title={savedCount ? "Deletes the ranking saved in the database (Admin only)" : "There is no saved ranking in the database"}
+          >
+            &#128465; {savedBusy ? "Deleting..." : savedCount ? `Delete saved ranking (${savedCount})` : "Delete saved ranking"}
+          </button>
+        </div>
       </div>
 
       {message && (
@@ -1013,27 +1044,32 @@ export default function MLRankingPage() {
         </div>
       )}
 
-      <div className="rounded-2xl border border-[#241012]/[0.07] bg-white p-5 shadow-sm">
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <span className="inline-flex h-6 items-center rounded-full bg-[#7B1113] px-2.5 text-[10px] font-bold uppercase tracking-wide text-white">
-            Step 1
-          </span>
-          <p className="text-sm font-bold text-[#241012]">Choose the scholarship program to scan &amp; rank</p>
-          {selectedProgramId && (
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-bold text-emerald-700 ring-1 ring-emerald-200">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-              {pendingByProgram[selectedProgramId] || 0} pending ready
-            </span>
-          )}
-        </div>
-        <div className="flex flex-wrap items-end gap-4">
-          <label className="block text-xs font-semibold text-[#241012]">
-            Scholarship program <span className="text-[#7B1113]">*</span>
+      <div className="overflow-hidden rounded-2xl border border-[#241012]/[0.07] bg-white shadow-sm">
+        {/* Card header - same shape as Documents Viewer: title + counts on the
+            left, the program <select> on the right where its student select sits. */}
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#241012]/[0.07] bg-gradient-to-r from-[#FAF7F5] to-white px-5 py-4">
+          <div>
+            <p className="text-sm font-bold text-[#241012]">AI OCR + Random Forest Ranking</p>
+            <p className="mt-0.5 text-[11px] text-[#6B5458]">
+              OCR reads every ITR for the declared income, the Random Forest ranks on it &middot;{" "}
+              <span className="font-semibold text-[#7B1113]">Rank 1 = most in need of financial assistance</span>
+              {selectedProgramId && (
+                <>
+                  {" \u00b7 "}
+                  <span className="font-semibold text-emerald-700">
+                    {pendingByProgram[selectedProgramId] || 0} pending ready
+                  </span>
+                </>
+              )}
+            </p>
+          </div>
+          <label className="text-xs font-semibold text-[#241012]">
+            Step 1 &middot; Scholarship program <span className="text-[#7B1113]">*</span>
             <select
               value={selectedProgramId ?? ""}
               onChange={(e) => handleProgramChange(e.target.value)}
               disabled={!!busy}
-              className="mt-1 w-full rounded-xl border border-[#241012]/15 bg-white px-3.5 py-2.5 text-xs shadow-sm outline-none transition focus:border-[#7B1113] focus:ring-4 focus:ring-[#7B1113]/10 disabled:cursor-not-allowed disabled:bg-[#F3EEEB] sm:min-w-[340px]"
+              className="mt-1 block w-full rounded-xl border border-[#241012]/10 bg-white px-3.5 py-2.5 text-xs outline-none transition focus:border-[#7B1113] focus:ring-4 focus:ring-[#7B1113]/10 disabled:cursor-not-allowed disabled:bg-[#F3EEEB] sm:min-w-[340px]"
             >
               <option value="">Choose a scholarship program...</option>
               {programs.map((p) => (
@@ -1043,108 +1079,83 @@ export default function MLRankingPage() {
               ))}
             </select>
           </label>
-          <p className="max-w-xl pb-1 text-[11px] text-[#6B5458]">
+        </div>
+
+        {/* Control row - Step 2 runs the pipeline. Delete / Export moved up to the
+            page header so this row stays one clean line. */}
+        <div className="flex flex-wrap items-center gap-2 border-b border-[#241012]/[0.07] bg-[#FAF7F5]/60 px-5 py-3">
+          <span
+            className="inline-flex h-6 items-center rounded-full border border-red-300 bg-red-50 px-3 text-[10px] font-bold text-red-700"
+            title="Admin prepares the ranking - only CHED users can give the final Approve / Not Approve decision"
+          >
+            Final approve: CHED only
+          </span>
+          <span className="inline-flex h-6 items-center rounded-full bg-[#241012]/[0.06] px-2.5 text-[10px] font-bold uppercase tracking-wide text-[#6B5458]">
+            Step 2
+          </span>
+          <button
+            onClick={() => runPipeline("rank")}
+            disabled={!!busy || !selectedProgramId || !(selectedProgramId && pendingByProgram[selectedProgramId])}
+            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-[#7B1113] to-[#540111] px-4 py-2 text-xs font-bold text-white shadow-md transition hover:brightness-110 active:scale-[0.99] disabled:opacity-50"
+            title={selectedProgramId ? "Runs the OCR scan of every ITR, then the Random Forest ranking - one click" : "Choose a scholarship program first"}
+          >
+            <span aria-hidden>&#9654;</span>
+            {busy === "rank"
+              ? "Executing OCR + Random Forest..."
+              : selectedProgramId
+                ? `Execute AI Ranking (${pendingByProgram[selectedProgramId] || 0} pending)`
+                : "Execute AI Ranking (select a program)"}
+          </button>
+          <span className="ml-auto text-[11px] text-[#6B5458]">
             {selectedProgramId ? (
               <>
-                <span className="font-semibold text-[#7B1113]">
-                  {pendingByProgram[selectedProgramId] || 0} pending application(s)
-                </span>{" "}
-                will be scanned (OCR of each ITR) and ranked by the Random Forest. Applications of other
-                scholarship programs are not touched.
+                Scans &amp; ranks only <b className="text-[#7B1113]">{pendingByProgram[selectedProgramId] || 0}</b>{" "}
+                pending application(s) of this program.
               </>
             ) : (
               <>
-                Select a program first — Step 2 (Execute AI Ranking) is disabled until a scholarship program is
-                chosen. {pendingCount} pending application(s) across all programs.
+                <b className="text-[#7B1113]">{pendingCount}</b> pending application(s) across all programs &mdash;
+                pick a program in Step 1.
               </>
             )}
+          </span>
+        </div>
+
+        {/* How it works - three short rules instead of a wall of text. */}
+        <div className="bg-white px-5 py-4">
+          <p className="mb-2 text-[10px] font-bold uppercase tracking-wide text-[#7B1113]">How this ranking works</p>
+          <div className="grid gap-2 text-[11px] leading-5 text-[#6B5458] sm:grid-cols-3">
+            <p className="rounded-lg bg-[#FAF7F5]/70 px-3 py-2">
+              <b className="text-[#241012]">1. ITR income only</b>
+              <br />
+              Need comes from the OCR-scanned ITR &mdash; grades are not used.
+            </p>
+            <p className="rounded-lg bg-[#FAF7F5]/70 px-3 py-2">
+              <b className="text-[#241012]">2. Verified applicants first</b>
+              <br />
+              Typed income matching the ITR (&ge;90%) ranks in front.
+            </p>
+            <p className="rounded-lg bg-[#FAF7F5]/70 px-3 py-2">
+              <b className="text-[#241012]">3. Mismatch or no ITR last</b>
+              <br />
+              0% match or no upload goes after the verified group.
+            </p>
+          </div>
+          <p className="mt-2 text-[11px] leading-5 text-[#6B5458]">
+            <b className="text-[#7B1113]">Official note:</b> Admin runs the OCR + Random Forest and prepares the CHED
+            forms &mdash; <b className="text-[#241012]">the final Approve / Not Approve decision is CHED only</b>.
           </p>
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="inline-flex h-6 items-center rounded-full border border-red-300 bg-red-50 px-3 text-[10px] font-bold text-red-700" title="Admin prepares the ranking — only CHED users can give the final Approve / Not Approve decision">
-          Final approve: CHED only
-        </span>
-        <span className="mr-1 inline-flex h-6 items-center rounded-full bg-[#241012]/[0.06] px-2.5 text-[10px] font-bold uppercase tracking-wide text-[#6B5458]">
-          Step 2
-        </span>
-        <button
-          onClick={() => runPipeline("rank")}
-          disabled={!!busy || !selectedProgramId || !(selectedProgramId && pendingByProgram[selectedProgramId])}
-          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-[#7B1113] to-[#540111] px-5 py-2.5 text-xs font-bold text-white shadow-md transition hover:brightness-110 active:scale-[0.99] disabled:opacity-50"
-          title={selectedProgramId ? "Runs the OCR scan of every ITR, then the Random Forest ranking — one click" : "Choose a scholarship program first"}
-        >
-          <span aria-hidden>&#9654;</span>
-          {busy === "rank"
-            ? "Executing OCR + Random Forest..."
-            : selectedProgramId
-              ? `Execute AI Ranking — OCR + Random Forest (${pendingByProgram[selectedProgramId] || 0} pending)`
-              : "Execute AI Ranking (select a program)"}
-        </button>
-        <div className="flex flex-wrap gap-2">
-          <button
-            onClick={deleteSavedRanking}
-            disabled={savedBusy || !savedCount}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-[#B91C1C]/40 px-4 py-2 text-xs font-bold text-[#B91C1C] transition hover:bg-[#B91C1C]/5 disabled:opacity-50"
-            title={savedCount ? "Deletes the ranking saved in the database (Admin only)" : "There is no saved ranking in the database"}
-          >
-            <span aria-hidden>&#128465;</span>
-            {savedBusy
-              ? "Deleting..."
-              : savedCount
-                ? `Delete saved ranking (${savedCount})`
-                : "Delete saved ranking"}
-          </button>
-          <button
-            onClick={exportChedFormsCsv}
-            disabled={!chedForms.length}
-            className="rounded-lg border border-[#7B1113]/30 px-4 py-2 text-xs font-bold text-[#7B1113] hover:bg-[#7B1113]/5 disabled:opacity-50"
-          >
-            Export CHED Forms CSV
-          </button>
-        </div>
-      </div>
-
-      <div className="rounded-2xl border border-[#7B1113]/15 bg-gradient-to-r from-[#FFF7ED] via-white to-white px-5 py-4 shadow-sm">
-        <p className="text-[10px] font-bold uppercase tracking-wide text-[#7B1113]">How this ranking works</p>
-        <p className="mt-1 text-[11px] leading-5 text-[#6B5458]">
-          Every pending application runs through two AI steps: <b className="text-[#7B1113]">OCR (pytesseract)</b> reads each
-          uploaded <b className="text-[#241012]">ITR</b> image to extract the declared income, then the{" "}
-          <b className="text-[#7B1113]">Random Forest classifier</b> ranks the applicants by that ITR income together with the
-          OCR match result.
-        </p>
-        <div className="mt-2 grid gap-2 text-[11px] leading-5 text-[#6B5458] sm:grid-cols-3">
-          <p>
-            <b className="text-[#241012]">1. ITR income only</b>
-            <br />
-            Financial need comes from the OCR-scanned ITR &mdash; academic grades are not used.
-          </p>
-          <p>
-            <b className="text-[#241012]">2. Verified applicants first</b>
-            <br />
-            Typed income that matches the ITR (&ge;90%) is ranked in front.
-          </p>
-          <p>
-            <b className="text-[#241012]">3. Mismatch or no ITR last</b>
-            <br />
-            0% match or no ITR upload is placed after the verified group.
-          </p>
-        </div>
-        <p className="mt-2 border-t border-[#7B1113]/10 pt-2 text-[11px] leading-5 text-[#6B5458]">
-          <b className="text-[#7B1113]">Official note:</b> Admin (Scholarship Office) runs this OCR + Random Forest ranking and
-          prepares the CHED forms &mdash; <b className="text-[#241012]">the final Approve / Not Approve decision is authorized by
-          CHED only</b>, after the ranking result.
-        </p>
-      </div>
-
-      <div className="rounded-2xl border border-[#241012]/[0.07] bg-white px-4 py-3 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="overflow-hidden rounded-2xl border border-[#241012]/[0.07] bg-white shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#241012]/[0.07] bg-gradient-to-r from-[#FAF7F5] to-white px-5 py-4">
           <div>
-            <p className="text-[10px] font-extrabold uppercase tracking-wide text-[#7B1113]">Historical training data</p>
-            <p className="mt-0.5 text-[11px] leading-5 text-[#6B5458]">
-              Upload the school&rsquo;s past scholarship applications (CSV or Excel). The Random Forest blends these
-              real records into training, alongside the synthetic sample and the live applicants.
+            <p className="text-sm font-bold text-[#241012]">Historical training data</p>
+            <p className="mt-0.5 text-[11px] text-[#6B5458]">
+              Optional: blend the school&rsquo;s past scholarship applications (CSV / Excel) into the training set.
+              Best columns <code className="rounded bg-[#241012]/[0.05] px-1">annual_income</code> and{" "}
+              <code className="rounded bg-[#241012]/[0.05] px-1">has_itr</code>.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -1161,7 +1172,7 @@ export default function MLRankingPage() {
             <button
               onClick={() => histInputRef.current?.click()}
               disabled={histBusy}
-              className="rounded-lg bg-[#7B1113] px-3.5 py-2 text-[11px] font-bold text-white hover:bg-[#540111] disabled:opacity-50"
+              className="rounded-xl bg-[#7B1113] px-4 py-2.5 text-xs font-bold text-white shadow-md transition hover:bg-[#540111] disabled:opacity-50"
             >
               {histBusy ? "Saving..." : histFile ? "Replace file" : "Upload CSV / Excel"}
             </button>
@@ -1169,29 +1180,26 @@ export default function MLRankingPage() {
               <button
                 onClick={removeHistFile}
                 disabled={histBusy}
-                className="rounded-lg border border-[#7B1113]/30 px-3.5 py-2 text-[11px] font-bold text-[#7B1113] hover:bg-[#7B1113]/5 disabled:opacity-50"
+                className="rounded-xl border border-[#7B1113]/30 px-4 py-2.5 text-xs font-bold text-[#7B1113] transition hover:bg-[#7B1113]/5 disabled:opacity-50"
               >
                 Remove
               </button>
             )}
           </div>
         </div>
-        <div className="mt-2 border-t border-[#241012]/[0.06] pt-2 text-[11px] leading-5 text-[#6B5458]">
+        <div className="bg-[#FAF7F5]/60 px-5 py-2.5 text-[11px] leading-5 text-[#6B5458]">
           {histError ? (
             <span className="font-semibold text-red-600">{histError}</span>
           ) : histFile ? (
             <span>
               Using <b className="text-[#241012]">{histFile.name}</b> ({Math.max(1, Math.round(histFile.size / 1024))} KB)
               {histFile.updated_at ? ` \u00b7 updated ${new Date(histFile.updated_at).toLocaleDateString("en-PH")}` : ""}
-              {" \u00b7"} blended into every training run.
+              {" \u00b7 "}blended into every training run.
             </span>
           ) : (
             <span>
-              No file uploaded yet &mdash; the bundled sample ({trainInfo?.n_csv ?? 20} rows) is used. Best column:
-              annual income (e.g. <code className="rounded bg-[#241012]/[0.05] px-1">annual_income</code>,
-              {" "}<code className="rounded bg-[#241012]/[0.05] px-1">family_income</code>) — optional, but the file
-              still trains without it. An ITR column (<code className="rounded bg-[#241012]/[0.05] px-1">has_itr</code>)
-              is optional too.
+              No file uploaded &mdash; the bundled sample ({trainInfo?.n_csv ?? 20} rows) is used. The file is optional;
+              training still runs without it.
             </span>
           )}
         </div>
@@ -1344,7 +1352,11 @@ export default function MLRankingPage() {
             </div>
           </div>
 
-          <div className="max-h-[70vh] overflow-auto">
+          {/* The table is wider than the card: a clearly visible scrollbar plus a
+              right-edge fade make it obvious there are more columns (Prediction,
+              ITR) to the right. */}
+          <div className="relative">
+            <div className="max-h-[70vh] overflow-auto [scrollbar-color:#7B111359_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar]:rounded-full [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#7B1113]/45 [&::-webkit-scrollbar-track]:bg-[#241012]/[0.04]">
             <table className="w-full min-w-[980px] text-left text-xs">
               <thead className="sticky top-0 z-10 bg-[#FAF7F5] text-[10px] uppercase tracking-wide text-[#6B5458] shadow-[0_1px_0_0_rgba(36,16,18,0.07)]">
                 <tr>
@@ -1375,6 +1387,11 @@ export default function MLRankingPage() {
                 ))}
               </tbody>
             </table>
+            </div>
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-y-0 right-0 w-5 bg-gradient-to-l from-white via-white/75 to-transparent"
+            />
           </div>
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-[#241012]/[0.07] bg-[#FAF7F5] px-5 py-2.5 text-[10px] text-[#6B5458]">
@@ -1661,11 +1678,15 @@ function RankRow({
           <div className="whitespace-nowrap font-semibold text-[#241012]">{row.student_name}</div>
           <div className="whitespace-nowrap text-[10px] text-[#8B7376]">{row.student_number || "\u2014"}</div>
         </td>
-        <td className="px-4 py-3 min-w-[170px] text-[#6B5458]">{row.program || "\u2014"}</td>
+        <td className="px-4 py-3">
+          <div className="max-w-[160px] truncate text-[#6B5458]" title={row.program || undefined}>
+            {row.program || "\u2014"}
+          </div>
+        </td>
         <td className="px-4 py-3 text-[#6B5458]">{row.year_level || "\u2014"}</td>
         <td className="px-4 py-3 text-[#6B5458]">{row.sex || "\u2014"}</td>
         <td className="px-4 py-3 text-[#6B5458]">{row.scholarship}</td>
-        <td className="px-4 py-3">
+        <td className="whitespace-nowrap px-4 py-3">
           <div className="font-semibold text-[#7B1113]">{peso(row.income_used ?? row.declared_income)}</div>
           <div className="text-[10px] text-[#8B7376]">
             {row.income_source?.startsWith("ocr")

@@ -78,6 +78,11 @@ interface ChedFormInput {
 
 const NO_VALUE = "";
 
+interface ScholarshipProgramOption {
+  scholarship_id: number;
+  scholarship_name: string;
+}
+
 function fill(value: unknown): string {
   if (value === null || value === undefined || value === "") return "N/A";
   return String(value);
@@ -94,6 +99,7 @@ export default function ApplicationsPage() {
   const [programFilter, setProgramFilter] = useState("");
   const [viewingId, setViewingId] = useState<number | null>(null);
   const [fileUrls, setFileUrls] = useState<Record<string, string>>({});
+  const [urlsLoading, setUrlsLoading] = useState(false);
   const [statusDraft, setStatusDraft] = useState<Record<number, { status: string; remarks: string }>>({});
   const [savingId, setSavingId] = useState<number | null>(null);
   const [message, setMessage] = useState("");
@@ -102,6 +108,9 @@ export default function ApplicationsPage() {
   const [notifyDraft, setNotifyDraft] = useState<Record<number, string>>({});
   const [batchBusy, setBatchBusy] = useState(false);
   const [search, setSearch] = useState("");
+  // Every program the Admin created, fetched straight from the table so a brand
+  // new (still empty) program shows up as a chip even before anyone applies.
+  const [allPrograms, setAllPrograms] = useState<ScholarshipProgramOption[]>([]);
 
   useEffect(() => {
     let ignore = false;
@@ -110,19 +119,21 @@ export default function ApplicationsPage() {
       const { data: { session } } = await sb.auth.getSession();
       if (!session) { router.push("/login"); return; }
 
-      const [appsQ, docsQ, acadsQ, chedQ] = await Promise.all([
+      const [appsQ, docsQ, acadsQ, chedQ, progsQ] = await Promise.all([
         sb.from("scholarship_applications")
           .select("*, scholarship_programs(scholarship_name, requirements), student_accounts(given_name, last_name, student_number, program_name, year_level, sex, registration_status, account_status)")
           .order("application_date", { ascending: false }),
         sb.from("support_documents").select("*").order("upload_date", { ascending: false }),
         sb.from("support_academic_records").select("*").order("created_at", { ascending: false }),
         sb.from("ched_form_input").select("*").order("ched_form_id", { ascending: false }),
+        sb.from("scholarship_programs").select("scholarship_id, scholarship_name").order("created_at", { ascending: false }),
       ]);
 
       if (!appsQ.error) setApplications(appsQ.data || []);
       if (!docsQ.error) setDocs(docsQ.data || []);
       if (!acadsQ.error) setAcads(acadsQ.data || []);
       if (!chedQ.error) setChedForms(chedQ.data || []);
+      if (!progsQ.error) setAllPrograms((progsQ.data || []) as ScholarshipProgramOption[]);
       if (!ignore) setLoading(false);
     }
     startFetching();
@@ -159,6 +170,13 @@ export default function ApplicationsPage() {
     return { required, missing, done: required.length - missing.length };
   };
 
+  // Declared BEFORE filteredApps on purpose: the program filter calls programKey
+  // on every row, and a `const` is in its temporal dead zone until this line
+  // runs. This only ever appeared to work because `!programFilter ||` used to
+  // short-circuit while the filter was still empty - the first chip click threw
+  // "Cannot access 'ea' before initialization".
+  const programKey = (a: ScholarshipApplication) => a.scholarship_programs?.scholarship_name || "No Scholarship Program";
+
   const filteredApps = applications
     .filter((a) => !statusFilter || a.application_status === statusFilter)
     .filter((a) => !programFilter || programKey(a) === programFilter)
@@ -179,8 +197,15 @@ export default function ApplicationsPage() {
   // Clickable category chips: one per scholarship program, so Admin can jump to
   // a program and see only the applications filed under it. Counts respect the
   // active status tab (All / Pending / Approved / Not Approved).
-  const programKey = (a: ScholarshipApplication) => a.scholarship_programs?.scholarship_name || "No Scholarship Program";
-  const programNames = Array.from(new Set(applications.map(programKey))).sort();
+  // Union of (a) every program Admin created - including ones nobody has applied
+  // to yet - and (b) every program an application still references, so neither an
+  // empty new program nor a renamed/deleted one can drop off the chip row.
+  const programNames = Array.from(
+    new Set([
+      ...allPrograms.map((p) => (p.scholarship_name || "").trim()).filter(Boolean),
+      ...applications.map(programKey),
+    ])
+  ).sort((a, b) => a.localeCompare(b));
   const programCounts: Record<string, number> = {};
   for (const name of programNames) {
     programCounts[name] = applications
@@ -191,23 +216,49 @@ export default function ApplicationsPage() {
 
   async function loadFileUrls(app: ScholarshipApplication) {
     setFileUrls({});
+    setUrlsLoading(true);
     const sb = getSupabase();
     const urls: Record<string, string> = {};
-    for (const d of appDocs(app)) {
-      const res = await sb.storage.from("support-documents").createSignedUrl(d.file_path, 3600);
-      if (res.data?.signedUrl) urls[d.file_path] = res.data.signedUrl;
-    }
-    for (const a of appAcads(app)) {
-      if (!a.proof_image_path) continue;
-      const res = await sb.storage.from("academic-records").createSignedUrl(a.proof_image_path, 3600);
-      if (res.data?.signedUrl) urls[a.proof_image_path] = res.data.signedUrl;
-    }
-    for (const c of appChed(app)) {
-      if (!c.income_tax_return) continue;
-      const res = await sb.storage.from("itr-documents").createSignedUrl(c.income_tax_return, 3600);
-      if (res.data?.signedUrl) urls[c.income_tax_return] = res.data.signedUrl;
-    }
-    setFileUrls(urls);
+
+    // 1) Sign with the logged-in user's key (fast, works for buckets that have a
+    //    read policy) ... 2) whatever is left gets signed by the API route with
+    //    the service key. The itr-documents bucket has no storage SELECT policy,
+    //    so step 1 alone leaves the ITR on "Opening ITR..." forever.
+    const signBatch = async (bucket: string, paths: (string | null | undefined)[]) => {
+      const uniq = [...new Set(paths.filter((p): p is string => !!p))];
+      if (!uniq.length) return;
+      try {
+        const { data } = await sb.storage.from(bucket).createSignedUrls(uniq, 3600);
+        for (const item of data || []) {
+          if (item?.signedUrl && item?.path) urls[item.path] = item.signedUrl;
+        }
+      } catch { /* fall through and ask the server */ }
+
+      const missing = uniq.filter((p) => !urls[p]);
+      if (!missing.length) return;
+      try {
+        const res = await fetch("/api/storage/signed-url", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ bucket, paths: missing }),
+        });
+        if (res.ok) {
+          const payload = (await res.json()) as { urls?: Record<string, string> };
+          for (const [p, u] of Object.entries(payload.urls || {})) {
+            if (u) urls[p] = u;
+          }
+        }
+      } catch { /* leave those files unreadable rather than spinning forever */ }
+    };
+
+    await Promise.all([
+      signBatch("support-documents", appDocs(app).map((d) => d.file_path)),
+      signBatch("academic-records", appAcads(app).map((a) => a.proof_image_path)),
+      signBatch("itr-documents", appChed(app).map((c) => c.income_tax_return)),
+    ]);
+
+    setFileUrls({ ...urls });
+    setUrlsLoading(false);
   }
 
   function openDetails(appId: number) {
@@ -490,14 +541,20 @@ export default function ApplicationsPage() {
 
   const viewingApp = applications.find((a) => a.application_id === viewingId) || null;
 
+  // Same cell padding/borders the Documents Viewer table uses, so both pages
+  // read as one design system.
+  const cellCls = "border border-[#241012]/10 px-3 py-1.5 align-middle";
+
   if (loading) return <Spinner label="Loading applications..." color="maroon" />;
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h1 className="text-xl font-bold text-[#241012]">Scholarship Applications</h1>
-          <p className="mt-1 text-xs text-[#8B7376]">{applications.length} student application(s) received.</p>
+          <p className="mt-1 text-xs text-[#8B7376]">
+            Every submitted application in one list — filter by status, search by name, or jump to a program chip.
+          </p>
         </div>
         <button
           onClick={exportCsv}
@@ -514,253 +571,313 @@ export default function ApplicationsPage() {
         </div>
       )}
 
-      <div className="relative w-full sm:max-w-md">
-        <svg className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#8B7376]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-        </svg>
-        <input
-          type="text"
-          placeholder="Search by name, student #, program, year, sex, scholarship..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="w-full rounded-xl border border-[#241012]/[0.06] bg-white py-2.5 pl-10 pr-4 text-xs outline-none focus:border-[#7B1113] focus:ring-1 focus:ring-[#7B1113]/20"
+      {applications.length === 0 ? (
+        <EmptyState
+          icon="&#128196;"
+          title="No applications found"
+          hint="Applications will appear here once students submit them."
         />
-      </div>
-
-      <div className="flex flex-wrap gap-2">
-        {FILTER_TABS.map((tab) => {
-          const count = tab.key === "" ? applications.length : tab.key === "Approved" ? approvedCount : tab.key === "Not Approved" ? notApprovedCount : pendingCount;
-          return (
-            <button
-              key={tab.key || "all"}
-              onClick={() => setStatusFilter(tab.key)}
-              className={`rounded-xl px-4 py-2 text-xs font-bold transition ${statusFilter === tab.key ? tab.active : `${tab.idle} border border-transparent`} ${statusFilter === tab.key ? "" : "border border-[#241012]/[0.06]"}`}
-            >
-              {tab.label} ({count})
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="flex flex-wrap gap-2">
-        <button
-          onClick={() => setProgramFilter("")}
-          className={`rounded-full px-3 py-1.5 text-[11px] font-bold transition ${programFilter === "" ? "bg-[#7B1113] text-white shadow" : "border border-[#241012]/[0.08] bg-white text-[#241012] hover:border-[#7B1113]/40"}`}
-          title="Show every scholarship program"
-        >
-          📚 All programs ({totalByStatus})
-        </button>
-        {programNames.map((name) => (
-          <button
-            key={name}
-            onClick={() => setProgramFilter(programFilter === name ? "" : name)}
-            className={`max-w-full truncate rounded-full px-3 py-1.5 text-[11px] font-bold transition ${programFilter === name ? "bg-[#7B1113] text-white shadow" : "border border-[#241012]/[0.08] bg-white text-[#241012] hover:border-[#7B1113]/40"}`}
-            title={`Show only applications filed under "${name}"`}
-          >
-            📚 {name} ({programCounts[name] ?? 0})
-          </button>
-        ))}
-      </div>
-
-      {filteredApps.length === 0 ? (
-        <EmptyState icon="&#128196;" title="No applications found" hint="Applications will appear here once students submit them." />
       ) : (
-        <div className="space-y-3">
-          <div className="rounded-xl border border-[#241012]/[0.06] bg-white p-4 shadow-sm">
-            <div className="flex flex-wrap items-center gap-3">
-              <label className="flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#241012]">
-                <input
-                  type="checkbox"
-                  checked={filteredApps.length > 0 && filteredApps.every((a) => selectedIds.has(a.application_id))}
-                  onChange={toggleSelectAll}
-                  className="h-4 w-4 accent-[#7B1113]"
-                />
-                Select all ({filteredApps.length})
-              </label>
-              {selectedIds.size > 0 && (
-                <span className="rounded-full bg-[#7B1113]/10 px-2.5 py-1 text-[11px] font-bold text-[#7B1113]">{selectedIds.size} selected</span>
-              )}
+        <div className="overflow-hidden rounded-2xl border border-[#241012]/[0.07] bg-white shadow-sm">
+          {/* Card header - same shape as Documents Viewer: title + counts on the
+              left, the search field on the right where its student <select> sits. */}
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#241012]/[0.07] bg-gradient-to-r from-[#FAF7F5] to-white px-5 py-4">
+            <div>
+              <p className="text-sm font-bold text-[#241012]">All Submitted Applications</p>
+              <p className="mt-0.5 text-[11px] text-[#6B5458]">
+                {filteredApps.length} of {applications.length} application{applications.length === 1 ? "" : "s"} shown &middot;{" "}
+                <span className="font-semibold text-[#7B1113]">one row per application</span>
+                {" \u00b7 "}
+                <span className="text-[#6B5458]">Click View Details to open the full form, uploaded documents and status controls</span>
+              </p>
             </div>
-
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <span
-                className="inline-flex items-center gap-1.5 rounded-lg border border-[#241012]/[0.12] bg-[#F3EEEB] px-3 py-2 text-[11px] font-bold text-[#6B5458]"
-                title="Locked for Admin — only CHED can approve or not-approve applications. Approve/Not approve buttons are on the CHED portal."
-              >
-                &#128274; Final approval: CHED only
-              </span>
-              <button
-                onClick={() => batchStatus("Pending", [...selectedIds])}
-                disabled={!selectedIds.size || batchBusy}
-                className="rounded-lg border border-amber-300 px-3 py-2 text-[11px] font-bold text-amber-700 transition hover:bg-amber-50 disabled:opacity-40"
-              >
-                Mark Pending
-              </button>
+            <div className="relative w-full sm:max-w-xs">
+              <svg className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#8B7376]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
               <input
-                value={batchMsg}
-                onChange={(e) => setBatchMsg(e.target.value)}
-                placeholder="Notification message for selected students..."
-                className="min-w-40 flex-1 rounded-lg border border-[#241012]/[0.06] px-3 py-2 text-xs outline-none focus:border-[#7B1113]"
+                type="text"
+                placeholder="Search by name, student #, program, year, sex, scholarship..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full rounded-xl border border-[#241012]/10 bg-white py-2.5 pl-9 pr-3 text-xs outline-none transition focus:border-[#7B1113] focus:ring-4 focus:ring-[#7B1113]/10"
               />
-              <button
-                onClick={batchNotify}
-                disabled={!selectedIds.size || batchBusy}
-                className="rounded-lg border border-[#7B1113]/30 px-3 py-2 text-[11px] font-bold text-[#7B1113] transition hover:bg-[#7B1113]/5 disabled:opacity-40"
-              >
-                Notify selected
-              </button>
             </div>
           </div>
 
-          {Object.entries(
-            filteredApps.reduce<Record<string, ScholarshipApplication[]>>((acc, app) => {
-              const key = app.scholarship_programs?.scholarship_name || "No Scholarship Program";
-              (acc[key] = acc[key] || []).push(app);
-              return acc;
-            }, {})
-          ).sort(([a], [b]) => a.localeCompare(b)).map(([programName, groupApps]) => (
-            <section key={programName}>
-              <div className="mb-2 mt-1 flex flex-wrap items-center gap-2">
-                <h2 className="text-sm font-bold text-[#7B1113]">📚 {programName}</h2>
-                <span className="rounded-full bg-[#7B1113]/10 px-2.5 py-0.5 text-[10px] font-bold text-[#7B1113]">
-                  {groupApps.length} application{groupApps.length === 1 ? "" : "s"}
-                </span>
-                <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-[10px] font-bold text-amber-700">
-                  {groupApps.filter((a) => a.application_status === "Pending").length} pending
-                </span>
-                {groupApps.some((a) => a.application_status === "Approved") && (
-                  <span className="rounded-full bg-green-100 px-2.5 py-0.5 text-[10px] font-bold text-green-700">
-                    {groupApps.filter((a) => a.application_status === "Approved").length} approved
-                  </span>
-                )}
-                {groupApps.some((a) => a.application_status === "Not Approved") && (
-                  <span className="rounded-full bg-red-100 px-2.5 py-0.5 text-[10px] font-bold text-red-700">
-                    {groupApps.filter((a) => a.application_status === "Not Approved").length} not approved
-                  </span>
-                )}
-              </div>
-              <div className="space-y-3">
-                {groupApps.map((app) => {
-            const currentStatus = app.application_status;
-            const reqStats = requirementStats(app);
-            const allReqs = reqStats.required.length > 0 && reqStats.missing.length === 0;
-            return (
-              <div key={app.application_id} className={`rounded-xl border bg-white p-4 shadow-sm transition ${selectedIds.has(app.application_id) ? "border-[#7B1113] ring-1 ring-[#7B1113]/20" : "border-[#241012]/[0.06]"}`}>
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                  <div className="flex min-w-0 items-start gap-3">
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.has(app.application_id)}
-                      onChange={() => toggleSelect(app.application_id)}
-                      className="mt-1 h-4 w-4 shrink-0 accent-[#7B1113]"
-                      title="Select this application"
-                    />
-                    <div className="flex h-10 w-10 flex-none items-center justify-center rounded-full bg-[#7B1113]/10 text-sm font-bold text-[#7B1113]">
-                      {app.student_accounts?.given_name?.[0] || "S"}{app.student_accounts?.last_name?.[0] || ""}
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="text-sm font-bold text-[#241012]">
-                          {app.student_accounts?.last_name}, {app.student_accounts?.given_name}
-                          <span className="font-normal text-[#8B7376]"> ({app.student_accounts?.student_number || "\u2014"})</span>
-                        </p>
-                        <Badge className={STATUS_STYLES[currentStatus] || ""}>{currentStatus}</Badge>
-                        <Badge
-                          className={allReqs
-                            ? "border-green-200 bg-green-50 text-green-700"
-                            : "border-amber-200 bg-amber-50 text-amber-700"}
-                          title={
-                            reqStats.missing.length === 0
-                              ? "The student uploaded every requirement of this program"
-                              : `Not compliant — missing: ${reqStats.missing.join(", ")}`
-                          }
-                        >
-                          {allReqs ? "\u2713 " : "\u26A0 "}{reqStats.done}/{reqStats.required.length} requirements
-                        </Badge>
-                      </div>
-                      <p className="mt-0.5 text-xs text-[#7B1113]">{app.scholarship_programs?.scholarship_name || "\u2014"}</p>
-                      <p className="text-[11px] text-[#8B7376]">{app.student_accounts?.program_name || "\u2014"} &middot; Submitted {formatDateTime(app.application_date)}</p>
-                    </div>
-                  </div>
+          {/* Status filter row - mirrors the Documents Viewer's type-filter row. */}
+          <div className="flex flex-wrap items-center gap-2 border-b border-[#241012]/[0.07] bg-[#FAF7F5]/60 px-5 py-3">
+            {FILTER_TABS.map((tab) => {
+              const count = tab.key === "" ? applications.length : tab.key === "Approved" ? approvedCount : tab.key === "Not Approved" ? notApprovedCount : pendingCount;
+              return (
+                <button
+                  key={tab.key || "all"}
+                  onClick={() => setStatusFilter(tab.key)}
+                  className={`rounded-lg px-3 py-1.5 text-[11px] font-bold transition ${
+                    statusFilter === tab.key
+                      ? `${tab.active} shadow-sm`
+                      : `border border-[#241012]/10 bg-white ${tab.idle}`
+                  }`}
+                >
+                  {tab.label} <span className={statusFilter === tab.key ? "text-white/70" : "text-[#8B7376]"}>{count}</span>
+                </button>
+              );
+            })}
+          </div>
 
-                  <div className="flex flex-wrap items-center gap-2 lg:flex-none">
-                    {STATUS_ACTIONS.map((action) =>
-                      currentStatus === action.status ? null : (
-                        <button
-                          key={action.status}
-                          onClick={() => quickStatus(app, action.status)}
-                          disabled={savingId === app.application_id}
-                          className="whitespace-nowrap rounded-lg border border-amber-300 px-3 py-1.5 text-[11px] font-bold text-amber-700 transition hover:bg-amber-50 disabled:opacity-40"
-                          title="Set this application back to Pending"
-                        >
-                          Mark {action.label}
-                        </button>
-                      )
-                    )}
-                    <button
-                      onClick={() => openDetails(app.application_id)}
-                      className="rounded-lg border border-[#241012]/15 px-3 py-1.5 text-[11px] font-bold text-[#241012] transition hover:bg-[#FAF7F5]"
-                    >
-                      View Details
-                    </button>
-                  </div>
-                </div>
+          {/* Program chips scroll sideways instead of wrapping, so the row stays one
+              line no matter how many programs Admin creates - and every chip stays
+              clickable. The right-hand fade hints there is more to scroll to. */}
+          <div className="relative border-b border-[#241012]/[0.07] bg-[#FAF7F5]/60 px-5 py-2.5">
+            <div className="flex gap-2 overflow-x-auto scroll-smooth pb-1 [-ms-overflow-style:none] [scrollbar-color:#7B111340_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar]:rounded-full [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#7B1113]/40 [&::-webkit-scrollbar-track]:bg-transparent">
+              <button
+                onClick={() => setProgramFilter("")}
+                className={`shrink-0 whitespace-nowrap rounded-full px-3 py-1.5 text-[11px] font-bold transition ${programFilter === "" ? "bg-[#7B1113] text-white shadow" : "border border-[#241012]/[0.08] bg-white text-[#241012] hover:border-[#7B1113]/40"}`}
+                title="Show every scholarship program"
+              >
+                📚 All programs ({totalByStatus})
+              </button>
+              {programNames.map((name) => (
+                <button
+                  key={name}
+                  onClick={() => setProgramFilter(programFilter === name ? "" : name)}
+                  className={`max-w-[18rem] shrink-0 truncate whitespace-nowrap rounded-full px-3 py-1.5 text-[11px] font-bold transition ${programFilter === name ? "bg-[#7B1113] text-white shadow" : "border border-[#241012]/[0.08] bg-white text-[#241012] hover:border-[#7B1113]/40"}`}
+                  title={`Show only applications filed under "${name}" (${programCounts[name] ?? 0})`}
+                >
+                  📚 {name} ({programCounts[name] ?? 0})
+                </button>
+              ))}
+            </div>
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-y-0 right-0 w-10 bg-gradient-to-l from-[#FAF7F5] via-[#FAF7F5]/70 to-transparent"
+            />
+          </div>
 
-                <div className="mt-3 flex flex-col gap-2 rounded-lg border border-[#241012]/[0.06] bg-[#FAF7F5]/60 p-2.5 sm:flex-row sm:items-center">
-                  <button
-                    onClick={() => handleNotify(app)}
-                    className="rounded-lg border border-[#7B1113]/30 px-3 py-1.5 text-[11px] font-bold text-[#7B1113] transition hover:bg-[#7B1113]/5"
-                  >
-                    Notify student
-                  </button>
-                  <input
-                    value={notifyDraft[app.application_id] || ""}
-                    onChange={(e) => setNotifyDraft((prev) => ({ ...prev, [app.application_id]: e.target.value }))}
-                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleNotify(app); } }}
-                    placeholder="Send this student a message..."
-                    className="flex-1 rounded-lg border border-[#241012]/[0.06] bg-white px-3 py-1.5 text-xs outline-none focus:border-[#7B1113]"
-                  />
-                  <button
-                    onClick={() => openDetails(app.application_id)}
-                    className="rounded-lg bg-[#7B1113] px-3 py-1.5 text-[11px] font-bold text-white transition hover:bg-[#540111]"
-                  >
-                    Update status &amp; docs
-                  </button>
-                </div>
-              </div>
-            );
-                })}
-              </div>
-            </section>
-          ))}
+          {/* Explicit confirmation of what is on screen: which program was picked
+              and how many of its students are listed below. */}
+          {programFilter && (
+            <div className="flex flex-wrap items-center gap-2 border-b border-[#241012]/[0.07] bg-[#7B1113]/[0.04] px-5 py-2.5">
+              <span className="text-xs font-bold text-[#7B1113]">
+                &#128218; Showing {filteredApps.length} student{filteredApps.length === 1 ? "" : "s"} who
+                applied to <span className="underline decoration-[#7B1113]/40 underline-offset-2">{programFilter}</span>
+              </span>
+              <button
+                onClick={() => setProgramFilter("")}
+                className="ml-auto rounded-lg border border-[#7B1113]/30 px-2.5 py-1 text-[11px] font-bold text-[#7B1113] transition hover:bg-[#7B1113]/10"
+                title="Clear the program filter and show every program again"
+              >
+                &#10005; Show all programs
+              </button>
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-2 border-b border-[#241012]/[0.07] px-5 py-3">
+            <label className="flex cursor-pointer items-center gap-2 text-xs font-semibold text-[#241012]">
+              <input
+                type="checkbox"
+                checked={filteredApps.length > 0 && filteredApps.every((a) => selectedIds.has(a.application_id))}
+                onChange={toggleSelectAll}
+                className="h-4 w-4 accent-[#7B1113]"
+              />
+              Select all ({filteredApps.length})
+            </label>
+            {selectedIds.size > 0 && (
+              <span className="rounded-full bg-[#7B1113]/10 px-2.5 py-1 text-[11px] font-bold text-[#7B1113]">{selectedIds.size} selected</span>
+            )}
+            <span
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#241012]/[0.12] bg-[#F3EEEB] px-3 py-1.5 text-[11px] font-bold text-[#6B5458]"
+              title="Locked for Admin — only CHED can approve or not-approve applications. Approve/Not approve buttons are on the CHED portal."
+            >
+              &#128274; Final approval: CHED only
+            </span>
+            <button
+              onClick={() => batchStatus("Pending", [...selectedIds])}
+              disabled={!selectedIds.size || batchBusy}
+              className="rounded-lg border border-amber-300 px-3 py-1.5 text-[11px] font-bold text-amber-700 transition hover:bg-amber-50 disabled:opacity-40"
+            >
+              Mark Pending
+            </button>
+            <input
+              value={batchMsg}
+              onChange={(e) => setBatchMsg(e.target.value)}
+              placeholder="Notification message for selected students..."
+              className="min-w-48 flex-1 rounded-lg border border-[#241012]/[0.06] px-3 py-1.5 text-xs outline-none focus:border-[#7B1113]"
+            />
+            <button
+              onClick={batchNotify}
+              disabled={!selectedIds.size || batchBusy}
+              className="rounded-lg border border-[#7B1113]/30 px-3 py-1.5 text-[11px] font-bold text-[#7B1113] transition hover:bg-[#7B1113]/5 disabled:opacity-40"
+            >
+              Notify selected
+            </button>
+          </div>
+
+          {/* One row per application - same table shape as Documents Viewer:
+              sticky header, alternating rows, scrolling body, stats footer. */}
+          {filteredApps.length === 0 ? (
+            <p className="px-5 py-10 text-center text-xs text-[#8B7376]">
+              {programFilter
+                ? `No applications for "${programFilter}" match this filter.`
+                : "No applications match this search or status filter."}
+            </p>
+          ) : (
+            <div className="max-h-[70vh] overflow-auto [-ms-overflow-style:none] [scrollbar-color:#7B111345_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar]:rounded-full [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[#7B1113]/45 [&::-webkit-scrollbar-track]:bg-[#241012]/[0.04]">
+              <table className="w-full min-w-[1040px] border-collapse text-left text-[11px] text-[#241012]">
+                <thead className="sticky top-0 z-10 bg-[#FAF7F5] text-[10px] uppercase tracking-wide text-[#6B5458] shadow-[0_1px_0_0_rgba(36,16,18,0.07)]">
+                  <tr>
+                    <th className={`${cellCls} w-10 text-center`}>
+                      <input
+                        type="checkbox"
+                        checked={filteredApps.length > 0 && filteredApps.every((a) => selectedIds.has(a.application_id))}
+                        onChange={toggleSelectAll}
+                        className="h-4 w-4 accent-[#7B1113]"
+                        title="Select every application shown"
+                      />
+                    </th>
+                    <th className={`${cellCls} w-12 text-center font-bold`}>#</th>
+                    <th className={`${cellCls} font-bold`}>Student ID</th>
+                    <th className={`${cellCls} font-bold`}>Full Name</th>
+                    <th className={`${cellCls} font-bold`}>Scholarship Program</th>
+                    <th className={`${cellCls} font-bold`}>Submitted</th>
+                    <th className={`${cellCls} font-bold`}>Status</th>
+                    <th className={`${cellCls} font-bold`}>Requirements</th>
+                    <th className={`${cellCls} w-32 font-bold`}>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredApps.map((app, i) => {
+                    const currentStatus = app.application_status;
+                    const reqStats = requirementStats(app);
+                    const allReqs = reqStats.required.length > 0 && reqStats.missing.length === 0;
+                    const isSel = selectedIds.has(app.application_id);
+                    const studentName = `${app.student_accounts?.last_name || ""}, ${app.student_accounts?.given_name || ""}`;
+                    return (
+                      <tr
+                        key={app.application_id}
+                        className={isSel ? "bg-[#7B1113]/[0.07]" : i % 2 ? "bg-[#FAF7F5]/60" : "bg-white"}
+                      >
+                        <td className={`${cellCls} text-center`}>
+                          <input
+                            type="checkbox"
+                            checked={isSel}
+                            onChange={() => toggleSelect(app.application_id)}
+                            className="h-4 w-4 accent-[#7B1113]"
+                            title="Select this application"
+                          />
+                        </td>
+                        <td className={`${cellCls} text-center font-bold text-[#6B5458]`}>{i + 1}</td>
+                        <td className={cellCls}>
+                          <button
+                            onClick={() => openDetails(app.application_id)}
+                            title={`Open the full application of ${studentName} (${app.student_accounts?.student_number || "no ID"})`}
+                            className="font-semibold text-[#7B1113] underline decoration-dotted underline-offset-2 transition hover:bg-[#7B1113]/5"
+                          >
+                            {app.student_accounts?.student_number || "\u2014"}
+                          </button>
+                        </td>
+                        <td className={`${cellCls} whitespace-nowrap font-bold text-[#241012]`}>
+                          {studentName}
+                          <div className="text-[10px] font-normal text-[#8B7376]">
+                            {app.student_accounts?.program_name || "\u2014"}
+                            {app.student_accounts?.year_level ? ` \u00b7 ${app.student_accounts.year_level}` : ""}
+                          </div>
+                        </td>
+                        <td className={cellCls}>
+                          <div
+                            className="max-w-[190px] truncate font-semibold text-[#7B1113]"
+                            title={app.scholarship_programs?.scholarship_name || "No scholarship program"}
+                          >
+                            {app.scholarship_programs?.scholarship_name || "\u2014"}
+                          </div>
+                        </td>
+                        <td className={`${cellCls} whitespace-nowrap text-[#6B5458]`}>{formatDateTime(app.application_date)}</td>
+                        <td className={cellCls}>
+                          <Badge className={STATUS_STYLES[currentStatus] || ""}>{currentStatus}</Badge>
+                        </td>
+                        <td className={cellCls}>
+                          <Badge
+                            className={
+                              allReqs
+                                ? "border-green-200 bg-green-50 text-green-700"
+                                : "border-amber-200 bg-amber-50 text-amber-700"
+                            }
+                            title={
+                              reqStats.missing.length === 0
+                                ? "The student uploaded every requirement of this program"
+                                : `Not compliant - missing: ${reqStats.missing.join(", ")}`
+                            }
+                          >
+                            {allReqs ? "\u2713 " : "\u26A0 "}
+                            {reqStats.done}/{reqStats.required.length}
+                          </Badge>
+                        </td>
+                        <td className={cellCls}>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => openDetails(app.application_id)}
+                              title={`Open ${studentName}'s form, documents, notify box and status controls`}
+                              className="rounded-md bg-[#7B1113] px-2.5 py-1 text-[10px] font-bold text-white transition hover:bg-[#540111]"
+                            >
+                              View Details
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-[#241012]/[0.07] bg-[#FAF7F5] px-5 py-2.5 text-[10px] text-[#6B5458]">
+            <span>Pending <b className="text-amber-700">{filteredApps.filter((a) => a.application_status === "Pending").length}</b></span>
+            <span>Approved <b className="text-green-700">{filteredApps.filter((a) => a.application_status === "Approved").length}</b></span>
+            <span>Not approved <b className="text-red-600">{filteredApps.filter((a) => a.application_status === "Not Approved").length}</b></span>
+            <span>Programs <b className="text-[#7B1113]">{programNames.length}</b></span>
+            <span className="ml-auto">
+              Showing <b className="text-[#7B1113]">{filteredApps.length}</b> of {applications.length} applications
+              {selectedIds.size ? ` \u00b7 ${selectedIds.size} selected` : ""}
+            </span>
+          </div>
         </div>
       )}
 
       {viewingApp && (
-        <div className="fixed inset-0 z-[70] flex items-start justify-center overflow-y-auto bg-[#241012]/50 p-4 backdrop-blur-sm sm:p-8" onClick={() => setViewingId(null)}>
-          <div className="w-full max-w-3xl rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-start justify-between gap-4 border-b border-[#241012]/[0.06] p-5">
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4" onClick={() => setViewingId(null)}>
+          <div className="flex max-h-[88vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start justify-between gap-3 border-b border-[#241012]/[0.06] px-5 py-4">
               <div className="min-w-0">
-                <h3 className="text-lg font-bold text-[#241012]">Application Details</h3>
-                <p className="mt-0.5 text-xs text-[#8B7376]">
-                  {viewingApp.student_accounts?.last_name}, {viewingApp.student_accounts?.given_name} &middot; {viewingApp.student_accounts?.student_number || "\u2014"}
+                <h3 className="truncate text-base font-bold text-[#241012]">
+                  Application Details — {viewingApp.student_accounts?.last_name}, {viewingApp.student_accounts?.given_name}
+                </h3>
+                <p className="mt-0.5 text-[11px] text-[#8B7376]">
+                  Student ID {viewingApp.student_accounts?.student_number || "\u2014"} &middot;{" "}
+                  {viewingApp.scholarship_programs?.scholarship_name || "No program"} &middot; Submitted {formatDateTime(viewingApp.application_date)} &middot;{" "}
+                  {appDocs(viewingApp).length} support &middot; {appAcads(viewingApp).length} academic &middot; {appChed(viewingApp).length} form
                 </p>
               </div>
-              <button onClick={() => setViewingId(null)} className="rounded-lg p-2 text-[#8B7376] transition hover:bg-[#F3EEEB] hover:text-[#241012]" aria-label="Close">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-5 w-5"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+              <button
+                onClick={() => setViewingId(null)}
+                className="rounded-full p-1 text-lg leading-none text-[#8B7376] transition hover:bg-[#7B1113]/5 hover:text-[#7B1113]"
+                aria-label="Close"
+              >
+                &times;
               </button>
             </div>
 
-            <div className="max-h-[calc(100vh-12rem)] space-y-6 overflow-y-auto p-5">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge className={STATUS_STYLES[viewingApp.application_status] || ""}>{viewingApp.application_status}</Badge>
-                <Badge className="border-[#241012]/[0.06] bg-[#F3EEEB] text-[#6B5458]">{viewingApp.scholarship_programs?.scholarship_name || "\u2014"}</Badge>
-                <button onClick={() => exportOneCsv(viewingApp)} className="rounded-lg border border-[#7B1113]/30 px-3 py-1.5 text-[11px] font-bold text-[#7B1113] transition hover:bg-[#7B1113]/5">
-                  &#11015; Export full form CSV
-                </button>
-              </div>
+            <div className="flex flex-wrap items-center gap-2 border-b border-[#241012]/[0.06] bg-[#FAF7F5] px-5 py-2.5">
+              <Badge className={STATUS_STYLES[viewingApp.application_status] || ""}>{viewingApp.application_status}</Badge>
+              <Badge className="border-[#241012]/[0.06] bg-white text-[#6B5458]">{viewingApp.scholarship_programs?.scholarship_name || "\u2014"}</Badge>
+              <span className="ml-auto text-[11px] text-[#8B7376]">
+                {requirementStats(viewingApp).required.length === 0
+                  ? "No requirements set for this program"
+                  : `${requirementStats(viewingApp).done} of ${requirementStats(viewingApp).required.length} requirements uploaded`}
+              </span>
+            </div>
 
-              <div className="rounded-xl border border-[#241012]/[0.06] bg-[#FAF7F5]/60 p-4">
+            <div className="max-h-[55vh] overflow-auto">
+              <div className="border-b border-[#241012]/[0.06] bg-[#FAF7F5]/60 px-5 py-4">
                 <h4 className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8B7376]">Applicant Profile</h4>
                 <div className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-3 lg:grid-cols-4">
                   <div className="rounded-lg bg-white p-2.5 shadow-sm"><p className="text-[10px] uppercase tracking-wide text-[#8B7376]">Full Name</p><p className="mt-0.5 font-semibold text-[#241012]">{viewingApp.student_accounts?.last_name}, {viewingApp.student_accounts?.given_name}</p></div>
@@ -775,7 +892,7 @@ export default function ApplicationsPage() {
               </div>
 
               {appChed(viewingApp).length > 0 ? (
-                <div className="rounded-xl border border-[#241012]/[0.06] bg-white p-4">
+                <div className="border-b border-[#241012]/[0.06] bg-white px-5 py-4">
                   <h4 className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8B7376]">Application Form Submitted</h4>
                   {appChed(viewingApp).map((c) => (
                     <div key={c.ched_form_id} className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-3 lg:grid-cols-4">
@@ -804,10 +921,19 @@ export default function ApplicationsPage() {
                               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="h-3.5 w-3.5"><path strokeLinecap="round" strokeLinejoin="round" d="M3 10.5h18M3 6h18M12 6v18M10.5 3h3M4.5 21h15a1.5 1.5 0 001.5-1.5V7.5A1.5 1.5 0 0019.5 6h-15A1.5 1.5 0 003 7.5v12A1.5 1.5 0 004.5 21z" /></svg>
                               View ITR
                             </a>
-                          ) : (
-                            <button type="button" disabled className="mt-1 inline-flex cursor-default items-center gap-1.5 rounded-lg border border-[#7B1113]/30 px-3 py-1.5 text-[11px] font-semibold text-[#8B7376]" title="Opening...">
+                          ) : urlsLoading ? (
+                            <button type="button" disabled className="mt-1 inline-flex cursor-default items-center gap-1.5 rounded-lg border border-[#7B1113]/30 px-3 py-1.5 text-[11px] font-semibold text-[#8B7376]" title="Signing a secure link...">
                               <span className="h-3 w-3 animate-spin rounded-full border-2 border-[#7B1113]/30 border-t-[#7B1113]" />
                               Opening ITR...
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => loadFileUrls(viewingApp)}
+                              className="mt-1 inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-[11px] font-bold text-amber-700 transition hover:bg-amber-100"
+                              title={`The ITR (${c.income_tax_return.split("/").pop()}) is uploaded but the link could not be created. Click to try again.`}
+                            >
+                              Could not open ITR · Retry
                             </button>
                           )
                         ) : <p className="mt-0.5 font-semibold text-[#241012]">{"\u2014"}</p>}
@@ -816,20 +942,20 @@ export default function ApplicationsPage() {
                   ))}
                 </div>
               ) : (
-                <div className="rounded-xl border border-[#241012]/[0.06] bg-white p-4">
+                <div className="border-b border-[#241012]/[0.06] bg-white px-5 py-4">
                   <h4 className="text-[11px] font-bold uppercase tracking-wide text-[#8B7376]">Application Form</h4>
                   <p className="mt-2 text-[11px] text-[#8B7376]">The student has not completed the CHED application form yet.</p>
                 </div>
               )}
 
-              <div className="rounded-xl border border-[#241012]/[0.06] bg-white p-4">
+              <div className="border-b border-[#241012]/[0.06] bg-[#FAF7F5]/60 px-5 py-4">
                 <h4 className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8B7376]">Academic Records ({appAcads(viewingApp).length})</h4>
                 {appAcads(viewingApp).length === 0 ? (
                   <p className="text-[11px] text-[#8B7376]">No academic records uploaded.</p>
                 ) : (
                   <ul className="space-y-2">
                     {appAcads(viewingApp).map((a) => (
-                      <li key={a.record_id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#241012]/[0.06] bg-[#FAF7F5]/60 px-3 py-2">
+                      <li key={a.record_id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[#241012]/[0.06] bg-white px-3 py-2 shadow-sm">
                         <div className="flex items-center gap-3 text-xs">
                           <Badge className="border-[#241012]/[0.06] bg-white text-[#6B5458]">{a.applicant_type || "N/A"}</Badge>
                           <span className="font-semibold text-[#241012]">GWA/GPA: {a.shs_gwa ?? a.college_gpa ?? "\u2014"}</span>
@@ -845,7 +971,7 @@ export default function ApplicationsPage() {
                 )}
               </div>
 
-              <div className="rounded-xl border border-[#241012]/[0.06] bg-white p-4">
+              <div className="bg-white px-5 py-4">
                 <h4 className="mb-3 text-[11px] font-bold uppercase tracking-wide text-[#8B7376]">Support Documents ({appDocs(viewingApp).length})</h4>
                 {appDocs(viewingApp).length === 0 ? (
                   <p className="text-[11px] text-[#8B7376]">No documents uploaded.</p>
@@ -869,50 +995,77 @@ export default function ApplicationsPage() {
               </div>
             </div>
 
-            <div className="flex flex-col gap-3 border-t border-[#241012]/[0.06] p-5">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <h4 className="text-[11px] font-bold uppercase tracking-wide text-[#8B7376]">Update Status</h4>
-                  <p className="mt-0.5 text-[10px] text-[#8B7376]">
-                    Approve &amp; Not Approve are decided by <b className="text-[#7B1113]">CHED only</b>.
-                  </p>
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    {STATUS_ACTIONS.map((action) => {
-                      const draft = statusDraft[viewingApp.application_id] || { status: viewingApp.application_status, remarks: viewingApp.remarks || "" };
-                      const isActive = draft.status === action.status;
-                      return (
-                        <button
-                          key={action.status}
-                          onClick={() => setStatusDraft({ ...statusDraft, [viewingApp.application_id]: { ...draft, status: action.status } })}
-                          className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition ${isActive ? action.active : action.idle}`}
-                        >
-                          {action.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
+            <div className="flex flex-col gap-3 border-t border-[#241012]/[0.06] px-5 py-3">
+              <div className="flex flex-col gap-2 rounded-xl border border-[#241012]/[0.06] bg-[#FAF7F5] px-3 py-2.5 sm:flex-row sm:items-center">
+                <span className="shrink-0 text-[11px] font-bold uppercase tracking-wide text-[#8B7376]">Notify student</span>
+                <input
+                  value={notifyDraft[viewingApp.application_id] || ""}
+                  onChange={(e) => setNotifyDraft((prev) => ({ ...prev, [viewingApp.application_id]: e.target.value }))}
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); handleNotify(viewingApp); } }}
+                  placeholder="Send this student a message..."
+                  className="min-w-48 flex-1 rounded-lg border border-[#241012]/10 bg-white px-3 py-2 text-xs outline-none transition focus:border-[#7B1113] focus:ring-4 focus:ring-[#7B1113]/10"
+                />
                 <button
-                  onClick={() => exportOneCsv(viewingApp)}
-                  className="self-start rounded-xl bg-[#7B1113] px-4 py-2.5 text-xs font-bold text-white transition hover:bg-[#540111]"
+                  onClick={() => handleNotify(viewingApp)}
+                  className="rounded-xl border border-[#7B1113]/30 px-4 py-2 text-xs font-bold text-[#7B1113] transition hover:bg-[#7B1113]/5"
                 >
-                  &#11015; Export form CSV
+                  Notify student
                 </button>
               </div>
 
-              <input
-                value={(statusDraft[viewingApp.application_id] && statusDraft[viewingApp.application_id].remarks) ?? viewingApp.remarks ?? ""}
-                onChange={(e) => setStatusDraft((prev) => ({ ...prev, [viewingApp.application_id]: { status: prev[viewingApp.application_id]?.status ?? viewingApp.application_status, remarks: e.target.value } }))}
-                placeholder="Remarks (sent to the student)..."
-                className="rounded-lg border border-[#241012]/[0.06] px-3 py-2 text-xs outline-none focus:border-[#7B1113]"
-              />
-              <button
-                onClick={() => handleStatusSave(viewingApp)}
-                disabled={savingId !== null}
-                className="rounded-xl bg-gradient-to-r from-[#7B1113] to-[#540111] px-4 py-2.5 text-xs font-bold text-white transition hover:brightness-110 disabled:opacity-40"
-              >
-                {savingId === viewingApp.application_id ? "Saving..." : "Save Status + Notify Student"}
-              </button>
+              <div>
+                <h4 className="text-[11px] font-bold uppercase tracking-wide text-[#8B7376]">Update Status</h4>
+                <p className="mt-0.5 text-[10px] text-[#8B7376]">
+                  Approve &amp; Not Approve are decided by <b className="text-[#7B1113]">CHED only</b>.
+                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  {STATUS_ACTIONS.map((action) => {
+                    const draft = statusDraft[viewingApp.application_id] || { status: viewingApp.application_status, remarks: viewingApp.remarks || "" };
+                    const isActive = draft.status === action.status;
+                    return (
+                      <button
+                        key={action.status}
+                        onClick={() => setStatusDraft({ ...statusDraft, [viewingApp.application_id]: { ...draft, status: action.status } })}
+                        className={`rounded-lg border px-3 py-1.5 text-[11px] font-bold transition ${isActive ? action.active : action.idle}`}
+                      >
+                        {action.label}
+                      </button>
+                    );
+                  })}
+                  <input
+                    value={(statusDraft[viewingApp.application_id] && statusDraft[viewingApp.application_id].remarks) ?? viewingApp.remarks ?? ""}
+                    onChange={(e) => setStatusDraft((prev) => ({ ...prev, [viewingApp.application_id]: { status: prev[viewingApp.application_id]?.status ?? viewingApp.application_status, remarks: e.target.value } }))}
+                    placeholder="Remarks (sent to the student)..."
+                    className="min-w-56 flex-1 rounded-lg border border-[#241012]/10 px-3 py-1.5 text-xs outline-none transition focus:border-[#7B1113] focus:ring-4 focus:ring-[#7B1113]/10"
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                {viewingApp.application_status !== "Pending" && (
+                  <button
+                    onClick={() => quickStatus(viewingApp, "Pending")}
+                    disabled={savingId !== null}
+                    title="One click: set this application back to Pending and notify the student (Approve / Not approve stay with CHED)"
+                    className="rounded-xl border border-amber-300 px-4 py-2 text-xs font-bold text-amber-700 transition hover:bg-amber-50 disabled:opacity-40"
+                  >
+                    Mark Pending now
+                  </button>
+                )}
+                <button
+                  onClick={() => exportOneCsv(viewingApp)}
+                  className="rounded-xl border border-[#7B1113]/30 px-4 py-2 text-xs font-bold text-[#7B1113] transition hover:bg-[#7B1113]/5"
+                >
+                  &#11015; Export form CSV
+                </button>
+                <button
+                  onClick={() => handleStatusSave(viewingApp)}
+                  disabled={savingId !== null}
+                  className="rounded-xl bg-gradient-to-r from-[#7B1113] to-[#540111] px-4 py-2 text-xs font-bold text-white shadow-md transition hover:brightness-110 disabled:opacity-40"
+                >
+                  {savingId === viewingApp.application_id ? "Saving..." : "Save Status + Notify Student"}
+                </button>
+              </div>
             </div>
           </div>
         </div>
