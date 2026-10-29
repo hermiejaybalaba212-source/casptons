@@ -23,13 +23,15 @@ Header aliases are accepted (income, family_income, gender, grade, ...).
 Values may carry currency symbols and thousands separators
 ("PHP 120,000.00" parses as 120000.0).
 
-Nothing here is ever fatal, and nothing has to be present for training or
-ranking to run:
+For the optional historical-data path, missing data is non-fatal:
 
 * A file without an income column (or a row without a usable income) still
   contributes every other recognized column as a *neutral* row (need score
   50, the default income baseline). Only rows with no income column AND no
   other recognized column are dropped.
+
+Colab-aligned training is stricter: it requires usable annual family income
+and an observed NPCINC label for each uploaded row.
 """
 
 from __future__ import annotations
@@ -110,7 +112,7 @@ def _money(value) -> Optional[float]:
         number = float(text)
     except ValueError:
         return None
-    return number if number > 0 else None
+    return number if number >= 0 else None
 
 
 def _num(value) -> Optional[float]:
@@ -207,7 +209,7 @@ def row_from(record: Dict[str, str], resolved: Dict[str, Optional[str]], income_
         row["income_missing"] = True
     if math.isnan(row["academic_norm"]):
         row["academic_norm"] = None
-    # Train-only proof-of-dataset: label straight from this row's income.
+    # Colab-aligned training maps the observed NPCINC decile to the target.
     if income_ranked and income is not None:
         row["income_ranked"] = True
         # Colab notebook target: `NPCINC <= 4` -> Prioritized (1), else Waitlisted
@@ -341,9 +343,8 @@ def load_training_csv(
 ) -> tuple[List[Dict], List[str]]:
     """Read the historical training file (uploaded, or the bundled sample).
 
-    Set ``income_ranked=True`` for the train-only proof-of-dataset run: rows
-    that carry an annual income are labelled from it directly (Rank 1 = lowest
-    income) instead of the neutral historical baseline.
+    Set ``income_ranked=True`` for Colab-aligned training: rows are labelled
+    from the uploaded ``NPCINC`` value (deciles 1-4 are prioritized).
     Set ``uploaded_only=True`` to prevent the train-only run from silently
     falling back to the bundled sample when the admin upload is unavailable.
     Returns (rows, warnings); never raises.

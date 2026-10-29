@@ -2,8 +2,8 @@
 
 Python side of the ranking feature. It reads every ITR image uploaded to the
 `itr-documents` Supabase bucket with OCR, compares the figure it reads against the
-income the applicant typed, then trains a Random Forest that ranks applicants so
-**Rank 1 = lowest usable annual family income**.
+income the applicant typed, then scores applicants with a Random Forest trained
+on the uploaded PSA FIES 2025 dataset.
 
 ## Tools used
 
@@ -16,7 +16,7 @@ income the applicant typed, then trains a Random Forest that ranks applicants so
 | Text detection + recognition (OCR) | rapidocr-onnxruntime (PP-OCRv3) | 1.2.3 |
 | OCR inference runtime | ONNX Runtime (CPU on Vercel, DirectML GPU on Windows) | 1.24.4+ |
 | OCR image operations | OpenCV | 5.0.0.93 locally; headless 4.10.0.84 on Vercel |
-| Random Forest classifier + regressor, metrics | scikit-learn | 1.9.1 |
+| Random Forest classifier (+ regressor for non-Colab local runs), metrics | scikit-learn | 1.9.1 |
 | Model persistence (`rf_ranking_seed2026.joblib`) | joblib | 1.6.0 |
 | Storage, streaming, process bridge | FastAPI service | `backend/app/main.py` and `backend/ml/service.py` |
 
@@ -60,30 +60,30 @@ Every event carries `t` = seconds since the process started.
 
 The uploaded-file training uses the Colab notebook's five income-derived
 features and binary target (`NPCINC <= 4`), with the same 80/20 stratified
-split, seed 42, 200 trees, depth 3 and minimum leaf size 200. If a program is
-selected when **Execute AI Ranking** is clicked, the pipeline scans that
-program's ITRs, freshly trains from the uploaded file only, and ranks those
-applicants with that same model. With no program selected, the action performs
-file-only training and displays its evaluation and dataset analytics.
+split, seed 42, 200 trees, depth 3, minimum leaf size 200, and classifier
+defaults. A training file must contain valid `TOINC` and `NPCINC` values for
+every row; incomplete labels are rejected rather than silently replaced by an
+income-derived proxy. The saved classifier is reused for later AI Ranking.
+With a program selected when **Execute AI Ranking** is clicked, the pipeline
+scans that program's ITRs and scores those applicants using the saved model.
+With no program selected, the action performs file-only training and displays
+its evaluation and dataset analytics.
 
-The classifier reports its predicted priority class and probability; the
-companion regressor reports a priority score. The final applicant order is
-deterministically sorted by the effective annual family income, ascending:
-a reliable OCR-read ITR amount corrects the typed amount, otherwise the
-declared amount is used. Thus Rank 1 is the applicant with the lowest usable
-annual income, and rows without any usable income sort last. OCR match status,
-model probability and priority score remain visible as separate review
-analytics; a mismatch does not silently place a higher-income applicant first.
+The classifier's predicted probability of the prioritized class is the primary
+ranking value, so the model that was trained from the dataset also determines
+the applicant order. Highest probability ranks first. Effective annual income
+(reliable OCR correction first, otherwise declared income) breaks probability
+ties, lowest income first. The model's predicted class, probability, priority
+score, and OCR match status remain visible for review.
 
 The dataset summary and model analytics are stored inside the deployed model
-artifact in Supabase Storage. Accuracy, precision, recall, F1, ROC-AUC, R², and
-RMSE are evaluated only on held-out rows with an observed `NPCINC` target
-(`NPCINC <= 4`); income-derived proxy labels are used for ranking but never
-reported as independent model-quality metrics. If the uploaded dataset has no
-observed `NPCINC` labels, the UI says independent evaluation is unavailable.
-Model-evaluation analytics and live OCR/ranking analytics are displayed
-separately so validation against held-out training labels is not confused with
-the current applicants' OCR match results.
+artifact in Supabase Storage. Accuracy, precision, recall, F1, and ROC-AUC are
+evaluated only on held-out rows with an observed `NPCINC` target. R² and RMSE
+are only available on the non-Colab regressor path; the Colab-aligned training
+fits only the classifier. Incomplete uploaded TOINC/NPCINC data is rejected
+rather than scored with proxy labels. Model-evaluation analytics and live
+OCR/ranking analytics are displayed separately so training-label validation
+isn't confused with the current applicants' OCR match results.
 
 ## Performance on the reference machine (AMD Athlon 300GE, 2C/4T)
 

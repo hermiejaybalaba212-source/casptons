@@ -973,7 +973,7 @@ export default function MLRankingPage() {
                 }.`
               : trainUploadedAndRank
                 ? `Training and ranking complete in ${seconds}s \u2014 the uploaded file trained the model, which then ranked ${finalRows.length} applicant(s) after OCR.`
-                : `Ranking complete in ${seconds}s \u2014 ${finalRows.length} applicant(s) prioritized. Rank 1 = lowest annual family income used.`,
+                : `Ranking complete in ${seconds}s \u2014 ${finalRows.length} applicant(s) prioritized by the trained model; annual income breaks probability ties.`,
         );
 
       }
@@ -1263,8 +1263,8 @@ export default function MLRankingPage() {
           <div>
             <p className="text-sm font-bold text-[#241012]">AI OCR + Random Forest Ranking</p>
             <p className="mt-0.5 text-[11px] text-[#6B5458]">
-              OCR reads each ITR linked to this program&rsquo;s applicants, then the Random Forest ranks them &middot;{" "}
-              <span className="font-semibold text-[#7B1113]">Rank 1 = lowest reliable annual family income</span>
+              OCR reads each ITR linked to this program&rsquo;s applicants, then the trained Random Forest ranks them &middot;{" "}
+              <span className="font-semibold text-[#7B1113]">Highest predicted priority ranks first; lower income breaks ties</span>
               {selectedProgramId && (
                 <>
                   {" \u00b7 "}
@@ -1396,8 +1396,7 @@ export default function MLRankingPage() {
               <b className="text-[#241012]"> The separate Execute Training Data button remains available for training-only runs.</b>
               <br />
               Reads <code className="rounded bg-[#241012]/[0.05] px-1">TOINC</code> (annual family income) &rarr; 5 features,
-              target <code className="rounded bg-[#241012]/[0.05] px-1">NPCINC &le; 4</code>; falls back to{" "}
-              <code className="rounded bg-[#241012]/[0.05] px-1">annual_income</code> on plain CSV files.
+              target <code className="rounded bg-[#241012]/[0.05] px-1">NPCINC &le; 4</code>. Both columns and valid values on every row are required for Colab-aligned training.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -1557,7 +1556,7 @@ export default function MLRankingPage() {
                 </>
               ) : (
                 <span className="font-semibold text-amber-800">
-                  Not independently evaluated: the file has no observed NPCINC labels. Income-derived priority is used for ranking, not model-accuracy claims.
+                  Not independently evaluated: this run has no observed NPCINC labels. Proxy labels are not presented as model-accuracy claims.
                 </span>
               )}
             </div>
@@ -1671,7 +1670,7 @@ export default function MLRankingPage() {
             <b className="text-[#241012]">How to read these results:</b>{" "}
             {lastRun.trainInfo?.evaluation?.available
               ? `Metrics compare predictions against ${lastRun.trainInfo.evaluation.n_test.toLocaleString()} held-out records with observed NPCINC labels. They indicate agreement with those labels, not a guarantee for every applicant.`
-              : "This upload has no observed NPCINC labels, so genuine held-out model-quality metrics are unavailable. Ranking still uses the trained model, but proxy targets are not presented as accuracy."}
+              : "This run has no observed NPCINC labels, so genuine held-out model-quality metrics are unavailable. Proxy targets are not presented as accuracy."}
           </div>
           {/* Genuine holdout metrics are shown only for observed NPCINC labels. */}
           {lastRun.trainInfo && (
@@ -1778,7 +1777,7 @@ export default function MLRankingPage() {
                   return pname ? `${pname} \u00b7 ` : "";
                 })()}
                 {ranked.length} applicant{ranked.length === 1 ? "" : "s"} ranked &middot;{" "}
-                <span className="font-semibold text-[#7B1113]">Rank 1 = lowest annual family income used</span>
+                <span className="font-semibold text-[#7B1113]">Rank 1 = highest model-predicted priority</span>
                 {" \u00b7 "}
                 <span className="text-[#6B5458]">
                   {ranked.some((row) => row.savedResultOnly)

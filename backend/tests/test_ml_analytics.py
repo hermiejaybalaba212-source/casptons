@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 from openpyxl import Workbook
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -31,12 +32,15 @@ class ForestStub:
         return [0 for _ in rows]
 
 
-class FixedScoreRegressor:
-    def __init__(self, scores):
-        self.scores = scores
+class FixedProbabilityClassifier:
+    def __init__(self, probabilities):
+        self.probabilities = probabilities
 
     def predict(self, rows):
-        return self.scores
+        return [int(probability >= 0.5) for probability in self.probabilities]
+
+    def predict_proba(self, rows):
+        return np.asarray([[1.0 - probability, probability] for probability in self.probabilities])
 
 
 class RankingAnalyticsTests(unittest.TestCase):
@@ -83,6 +87,15 @@ class RankingAnalyticsTests(unittest.TestCase):
         self.assertEqual(observed["priority_target"], 100.0)
         self.assertEqual(observed["target_source"], "npcinc")
         self.assertEqual(proxy["target_source"], "income_proxy")
+
+    def test_colab_income_features_accept_zero_income(self):
+        resolved = _resolve({"toinc": "TOINC", "npcinc": "NPCINC"})
+
+        row = row_from({"TOINC": "0", "NPCINC": "1"}, resolved, income_ranked=True)
+
+        self.assertEqual(row["annual_income_family"], 0.0)
+        self.assertEqual(row["priority_target"], 100.0)
+        self.assertEqual(row["itr_income_bracket"], 1.0)
 
     def test_build_docs_only_includes_selected_applicant_itr_files(self):
         applicants = [
@@ -216,6 +229,15 @@ class RankingAnalyticsTests(unittest.TestCase):
         self.assertEqual(restored["dataset"], trained["dataset"])
         self.assertEqual(restored["evaluation"], trained["evaluation"])
         self.assertTrue(restored["persisted"])
+        self.assertIsNone(payload["regressor"])
+        classifier_params = trained["classifier"].get_params()
+        self.assertEqual(classifier_params["n_estimators"], 5)
+        self.assertEqual(classifier_params["max_depth"], 3)
+        self.assertEqual(classifier_params["min_samples_leaf"], 1)
+        self.assertEqual(classifier_params["min_samples_split"], 2)
+        self.assertEqual(classifier_params["class_weight"], "balanced")
+        self.assertEqual(classifier_params["random_state"], 42)
+        self.assertEqual(classifier_params["n_jobs"], 1)
 
     def test_income_proxy_targets_are_not_reported_as_model_accuracy(self):
         rows = []
@@ -246,7 +268,7 @@ class RankingAnalyticsTests(unittest.TestCase):
                     n_synth=0,
                     max_depth=3,
                     min_samples_leaf=1,
-                    income_ranked=True,
+                    income_ranked=False,
                     csv_rows_override=rows,
                     columns=features.NOTEBOOK_FEATURE_COLUMNS,
                 )
@@ -257,7 +279,7 @@ class RankingAnalyticsTests(unittest.TestCase):
         self.assertIsNone(trained["f1"])
         self.assertIsNone(trained["roc_auc"])
 
-    def test_income_order_uses_reliable_ocr_income_before_match_status_or_model_score(self):
+    def test_model_probability_orders_applicants_before_income_tiebreak(self):
         rows = [
             {
                 "application_id": 1,
@@ -282,16 +304,48 @@ class RankingAnalyticsTests(unittest.TestCase):
             },
         ]
         model = {
-            "regressor": FixedScoreRegressor([1, 100, 50]),
-            "classifier": None,
+            "regressor": None,
+            "classifier": FixedProbabilityClassifier([0.2, 0.9, 0.9]),
             "feature_columns": ["annual_income_family"],
             "medians": {"annual_income_family": 0},
         }
 
         ranked = predict(rows, model)
 
-        self.assertEqual([row["application_id"] for row in ranked], [1, 3, 2])
+        self.assertEqual([row["application_id"] for row in ranked], [3, 2, 1])
         self.assertEqual([row["rank"] for row in ranked], [1, 2, 3])
+        self.assertEqual([row["priority_score"] for row in ranked], [90.0, 90.0, 20.0])
+
+    def test_colab_training_requires_observed_npcinc_labels(self):
+        rows = [
+            {
+                "annual_income_family": 120_000,
+                "priority_target": 80,
+                "target_source": "income_proxy",
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("ml.rank_model._config.MODEL_DIR", Path(directory)):
+                with self.assertRaisesRegex(ValueError, "NPCINC"):
+                    train(
+                        [],
+                        seed=42,
+                        n_trees=5,
+                        n_synth=0,
+                        income_ranked=True,
+                        csv_rows_override=rows,
+                        columns=features.NOTEBOOK_FEATURE_COLUMNS,
+                    )
+
+    def test_colab_upload_validation_rejects_rows_skipped_for_missing_income(self):
+        from ml.pipeline import validate_colab_training_upload
+
+        with self.assertRaisesRegex(ValueError, "TOINC.*NPCINC"):
+            validate_colab_training_upload(
+                [{"annual_income_family": 100_000}],
+                ["training data line 3: skipped (nothing usable)"],
+            )
 
     def test_uploaded_training_and_ranking_uses_one_fresh_file_only_model(self):
         from ml import csv_data, pipeline
@@ -366,6 +420,7 @@ class RankingAnalyticsTests(unittest.TestCase):
         self.assertEqual(train_kwargs["csv_rows_override"], training_rows)
         self.assertEqual(train_kwargs["columns"], features.NOTEBOOK_FEATURE_COLUMNS)
         predict_mock.assert_called_once()
+        self.assertIs(predict_mock.call_args.args[1], training_result)
         events = [json.loads(line) for line in output.getvalue().splitlines() if line.startswith("{")]
         self.assertTrue(any(event.get("type") == "train" for event in events))
         self.assertTrue(any(event.get("type") == "rank" for event in events))

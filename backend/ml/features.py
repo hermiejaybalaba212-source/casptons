@@ -270,9 +270,8 @@ def priority_target(row: Dict) -> float:
     #  * rows from the UPLOADED HISTORICAL FILE -> dataset score
     #    (neutral need baseline + statutory priority flags), and
     #  * live applicants -> the original income / ITR formula, unchanged.
-    # The train-only "proof of dataset" run sets income_ranked so the file's
-    # OWN rows learn straight from their annual family income (Rank 1 = lowest
-    # income), the same way the Colab FIES notebook labels its households.
+    # Colab-aligned rows carry the observed NPCINC-derived target directly.
+    # This income-based proxy is only a fallback for other training paths.
     if row.get("income_ranked") and need is not None:
         return round(float(np.clip(need + bonus, 0.0, 100.0)), 4)
     if _config.HISTORICAL_DATASET_RANKING and row.get("source") == "csv":

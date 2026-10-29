@@ -1,14 +1,15 @@
 """Random Forest ranking model (scikit-learn + joblib).
 
-Two forests are trained on the same feature matrix:
+For Colab-aligned training, one classifier is trained on the five PSA FIES
+income features and `NPCINC <= 4`; its priority probability drives applicant
+ordering. The general local-training path fits a classifier and regressor:
 
 * ``RandomForestClassifier`` -> High Need / Low Need + probability
   (accuracy / precision / recall / F1 / ROC-AUC for the analytics panel)
-* ``RandomForestRegressor``  -> the composite **priority score** used to rank
-  applicants. Rank 1 = highest priority = most in need of financial aid.
+* ``RandomForestRegressor`` -> a separate priority score for local analytics
 
-The training set is a seeded synthetic population blended with the real
-applicants of the current run, then persisted with joblib.
+Colab-aligned training uses only the uploaded labelled dataset and is persisted
+with joblib for later applicant scoring.
 """
 
 from __future__ import annotations
@@ -186,11 +187,11 @@ def train(
     csv_rows_override: Optional[List[Dict]] = None,
     columns: Optional[List[str]] = None,
 ) -> Dict:
-    """Train both forests, persist with joblib, return analytics.
+    """Train and persist the ranking model, then return its analytics.
 
     ``columns`` pins the feature matrix to an explicit list - the train-only
-    run passes the Colab notebook's five TOINC-derived columns so the forest
-    here is the same model the notebook trains.
+    run passes the Colab notebook's five TOINC-derived columns so its
+    classifier matches the notebook's model.
     """
     from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
     from sklearn.metrics import (
@@ -212,6 +213,22 @@ def train(
         csv_rows, csv_warnings = _csv_data.load_training_csv(income_ranked=income_ranked)
     else:
         csv_rows, csv_warnings = list(csv_rows_override), []
+    if income_ranked:
+        if any(
+            "skipped (nothing usable)" in warning or "no income value" in warning
+            for warning in csv_warnings
+        ):
+            raise ValueError(
+                "Colab-aligned training requires valid annual family income (TOINC) and "
+                "NPCINC values on every uploaded row."
+            )
+        unlabeled_count = sum(row.get("target_source") != "npcinc" for row in csv_rows)
+        if unlabeled_count:
+            raise ValueError(
+                "Colab-aligned training requires a valid NPCINC value for every uploaded "
+                f"training row; {unlabeled_count} of {len(csv_rows)} row(s) are missing it. "
+                "Upload the PSA FIES dataset with both TOINC and NPCINC columns."
+            )
     rows = synth + csv_rows + list(real_rows)
     dataset = _dataset_analytics(synth, csv_rows, real_rows)
 
@@ -222,7 +239,18 @@ def train(
     )
     y_reg = np.array([row["priority_target"] for row in rows], dtype=np.float64)
 
-    stratify = y_cls if len(np.unique(y_cls)) > 1 and np.min(np.bincount(y_cls)) >= 2 else None
+    stratify = None
+    if income_ranked:
+        class_counts = np.bincount(y_cls, minlength=2)
+        if np.any(class_counts < 2):
+            raise ValueError(
+                "Colab-aligned training needs at least two rows in each NPCINC priority "
+                f"class for its stratified split; found {class_counts[1]} prioritized and "
+                f"{class_counts[0]} not prioritized."
+            )
+        stratify = y_cls
+    elif len(np.unique(y_cls)) > 1 and np.min(np.bincount(y_cls)) >= 2:
+        stratify = y_cls
     target_is_observed = np.array(
         [row.get("target_source") == "npcinc" for row in rows],
         dtype=bool,
@@ -249,32 +277,34 @@ def train(
     clf = RandomForestClassifier(
         n_estimators=n_trees,
         max_depth=max_depth,
-        min_samples_split=5,
+        min_samples_split=2 if income_ranked else 5,
         min_samples_leaf=min_samples_leaf,
         class_weight="balanced",
         random_state=seed,
-        n_jobs=_config.RF_N_JOBS,
+        n_jobs=1 if income_ranked else _config.RF_N_JOBS,
     )
     clf.fit(X_train, y_cls_train)
 
-    reg = RandomForestRegressor(
-        n_estimators=n_trees,
-        max_depth=max_depth,
-        min_samples_split=5,
-        min_samples_leaf=min_samples_leaf,
-        random_state=seed,
-        n_jobs=_config.RF_N_JOBS,
-    )
-    reg.fit(X_train, y_reg_train)
+    reg = None
+    if not income_ranked:
+        reg = RandomForestRegressor(
+            n_estimators=n_trees,
+            max_depth=max_depth,
+            min_samples_split=5,
+            min_samples_leaf=min_samples_leaf,
+            random_state=seed,
+            n_jobs=_config.RF_N_JOBS,
+        )
+        reg.fit(X_train, y_reg_train)
 
     cls_pred = clf.predict(X_test)
     cls_proba = clf.predict_proba(X_test)[:, 1]
-    reg_pred = reg.predict(X_test)
+    reg_pred = reg.predict(X_test) if reg is not None else None
     eval_cls_true = y_cls_test[observed_test]
     eval_cls_pred = cls_pred[observed_test]
     eval_cls_proba = cls_proba[observed_test]
     eval_reg_true = y_reg_test[observed_test]
-    eval_reg_pred = reg_pred[observed_test]
+    eval_reg_pred = reg_pred[observed_test] if reg_pred is not None else None
     evaluation_available = len(eval_cls_true) > 0
     auc = None
     if evaluation_available and len(np.unique(eval_cls_true)) > 1:
@@ -297,9 +327,10 @@ def train(
     # the wrong matrix ("X has 20 features ... expecting 5").
     used_columns = list(columns) if columns else list(_features.FEATURE_COLUMNS)
 
+    importance_model = reg or clf
     importance = {
         name: round(float(value), 5)
-        for name, value in zip(used_columns, reg.feature_importances_)
+        for name, value in zip(used_columns, importance_model.feature_importances_)
     }
     analytics = {
         "evaluation": evaluation,
@@ -309,8 +340,10 @@ def train(
         "f1": round(float(f1_score(eval_cls_true, eval_cls_pred, zero_division=0)), 4) if evaluation_available else None,
         "roc_auc": round(auc, 4) if auc is not None else None,
         "confusion_matrix": matrix,
-        "r2": round(float(r2_score(eval_reg_true, eval_reg_pred)), 4) if len(eval_reg_true) >= 2 else None,
-        "rmse": round(float(root_mean_squared_error(eval_reg_true, eval_reg_pred)), 4) if evaluation_available else None,
+        "r2": round(float(r2_score(eval_reg_true, eval_reg_pred)), 4)
+        if reg_pred is not None and len(eval_reg_true) >= 2 else None,
+        "rmse": round(float(root_mean_squared_error(eval_reg_true, eval_reg_pred)), 4)
+        if reg_pred is not None and evaluation_available else None,
         "feature_importance": importance,
         "dataset": dataset,
         "train_ms": round((time.time() - started) * 1000, 1),
@@ -587,13 +620,12 @@ def load_external(path=None, required: bool = False) -> Optional[Dict]:
     }
 
 
-def _income_for_sort(item: Dict) -> float:
-    """Return the effective annual income used by the rank-order policy.
+def _income_for_tiebreak(item: Dict) -> float:
+    """Return effective annual income for deterministic model-probability ties.
 
     ``annual_income_family`` is the raw TOINC / annual income that the file
-    rows carry - it must be checked, or every train-mode row ties at inf and
-    Rank 1 stops being the lowest-income household. OCR-corrected income takes
-    precedence; rows with no usable income sort last.
+    rows carry. OCR-corrected income takes precedence; rows without a usable
+    income sort last within a probability tie.
     """
     for key in ("income_used", "declared_income", "annual_income_family", "ocr_income"):
         value = item.get(key)
@@ -602,13 +634,13 @@ def _income_for_sort(item: Dict) -> float:
                 number = float(value)
             except (TypeError, ValueError):
                 continue
-            if number == number:  # skip NaN
+            if math.isfinite(number):
                 return number
     return math.inf
 
 
 def predict(rows: List[Dict], trained: Dict) -> List[Dict]:
-    """Score every applicant and return them sorted Rank 1 = most needed."""
+    """Score applicants; highest model-predicted priority probability ranks first."""
     if not rows:
         return []
     # Column order comes from the model that is about to score, not from the
@@ -635,18 +667,9 @@ def predict(rows: List[Dict], trained: Dict) -> List[Dict]:
         else:
             X = pd.DataFrame(X, columns=columns)
 
-    # Both forests available (the local trainer): use each as designed.
-    # Classifier only (the Colab notebook's export): the priority score is the
-    # probability of the "prioritised" class, scaled to 0-100 so it still reads
-    # as a priority score in the UI.
-    # Regressor only: the label is derived from the score threshold.
-    if reg is not None and clf is not None:
-        scores = reg.predict(X)
+    if clf is not None:
         labels = clf.predict(X)
         probabilities = clf.predict_proba(X)[:, 1]
-    elif clf is not None:
-        probabilities = clf.predict_proba(X)[:, 1]
-        labels = (probabilities >= 0.5).astype(int)
         scores = np.clip(probabilities * 100.0, 0.0, 100.0)
     elif reg is not None:
         scores = reg.predict(X)
@@ -700,12 +723,12 @@ def predict(rows: List[Dict], trained: Dict) -> List[Dict]:
             }
         )
 
-    # OCR is used to correct the income when its read is reliable. Rank by
-    # that effective annual income directly so Rank 1 is always the lowest
-    # income; model scores and ITR-match status remain visible for analytics.
+    # The trained model's predicted prioritized-class probability is the
+    # ranking basis. OCR-corrected income breaks probability ties, lowest first.
     ranked.sort(
         key=lambda item: (
-            _income_for_sort(item),
+            -item["probability"],
+            _income_for_tiebreak(item),
             -item["priority_score"],
         )
     )

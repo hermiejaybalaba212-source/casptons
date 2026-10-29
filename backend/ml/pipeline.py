@@ -369,6 +369,25 @@ def index_by_application(scan_results: dict) -> dict:
     return out
 
 
+def validate_colab_training_upload(rows: list, warnings: list) -> None:
+    if not rows:
+        raise ValueError(
+            "No usable training rows in the uploaded file. Upload a CSV / Excel "
+            "with valid annual family income (TOINC) and NPCINC values."
+        )
+    skipped_rows = [
+        warning
+        for warning in warnings
+        if "skipped (nothing usable)" in warning or "no income value" in warning
+    ]
+    if skipped_rows:
+        raise ValueError(
+            "Colab-aligned training requires valid annual family income (TOINC) and "
+            "NPCINC values on every uploaded row. Fix the rows missing either value "
+            "and upload the file again."
+        )
+
+
 ML_WARM = threading.Event()
 
 
@@ -535,11 +554,7 @@ def main() -> int:
                     income_ranked=True,
                     uploaded_only=True,
                 )
-                if not csv_rows:
-                    raise ValueError(
-                        "No usable training rows in the uploaded file. Upload a CSV / Excel "
-                        "with an annual_income column in 'Machine learning train data' first."
-                    )
+                validate_colab_training_upload(csv_rows, csv_warnings)
                 rows = csv_rows
                 for warning in csv_warnings:
                     log(warning)
@@ -549,8 +564,9 @@ def main() -> int:
                     f"({len(incomes)} with a usable annual family income)."
                 )
                 log(
-                    "Proof of dataset: these file rows are ranked by the same forest they "
-                    "trained - Rank 1 = lowest annual family income = highest priority."
+                    "Colab-aligned training: the uploaded rows teach the classifier which "
+                    "NPCINC <= 4 households are prioritized. Later applicant ranking uses "
+                    "that model's predicted priority probability."
                 )
             else:
                 by_app = index_by_application(scan_results)
@@ -563,11 +579,7 @@ def main() -> int:
                         income_ranked=True,
                         uploaded_only=True,
                     )
-                    if not csv_rows:
-                        raise ValueError(
-                            "No usable training rows in the uploaded file. Upload a CSV / Excel "
-                            "with an annual_income column in 'Machine learning train data' first."
-                        )
+                    validate_colab_training_upload(csv_rows, csv_warnings)
                     for warning in csv_warnings:
                         log(warning)
                     incomes = [
@@ -782,7 +794,10 @@ def main() -> int:
                         f"income {_peso(item.get('income_used') or item.get('annual_income_family'))} "
                         f"from {item.get('income_source', 'declared')})"
                     )
-                log("Ranking complete: Rank 1 = highest priority = most in need of financial assistance.")
+                log(
+                    "Ranking complete: highest model-predicted priority probability ranks first; "
+                    "lower OCR-corrected annual income breaks ties."
+                )
 
         emit(
             {
