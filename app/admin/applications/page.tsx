@@ -704,7 +704,6 @@ export default function ApplicationsPage() {
       });
       setProgramFilter("");
       setImportedVisible(INITIAL_IMPORTED_ROWS);
-      setCollapsedCourses({});
       setMessage(
         `Imported ${json.row_count.toLocaleString()} row(s) and ${json.columns.length} column(s) from ${json.file_name} - listed in the table below.` +
           (json.saved ? " Saved on the server, so it survives a refresh." : ""),
