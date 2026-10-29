@@ -59,7 +59,7 @@ function objectNameFor(original: string): string {
 
 /** One file per folder: clear whatever is in `historical/` before writing, so
  *  a newly named upload never leaves a stale sibling the loader could pick. */
-async function clearHistorical(bucket: ReturnType<typeof serviceBucket>) {
+async function clearHistorical(bucket: Awaited<ReturnType<typeof serviceBucket>>) {
   if (!bucket) return;
   const { data } = await bucket.list("historical", { limit: 100 });
   // `list()` returns `name` relative to the prefix it was called with.
@@ -67,19 +67,42 @@ async function clearHistorical(bucket: ReturnType<typeof serviceBucket>) {
   if (paths.length) await bucket.remove(paths);
 }
 
-function serviceBucket() {
+function serviceClient() {
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!key) return null;
-  const sb = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, key, {
+  return createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, key, {
     auth: { persistSession: false, autoRefreshToken: false },
   });
+}
+
+async function serviceBucket() {
+  const sb = serviceClient();
+  if (!sb) return null;
+
+  // Storage buckets are project resources and are not created by a Vercel
+  // deployment. Create the private bucket on first use when it is missing.
+  const { data: existing, error: lookupError } = await sb.storage.getBucket(BUCKET);
+  if (lookupError && !/not found|does not exist/i.test(lookupError.message)) {
+    throw new Error(`Could not access Supabase Storage bucket "${BUCKET}": ${lookupError.message}`);
+  }
+  if (!existing) {
+    const { error: createError } = await sb.storage.createBucket(BUCKET, { public: false });
+    if (createError && !/already exists/i.test(createError.message)) {
+      throw new Error(`Could not create Supabase Storage bucket "${BUCKET}": ${createError.message}`);
+    }
+  }
   return sb.storage.from(BUCKET);
 }
 
 export async function GET(req: Request) {
   const auth = await assertAdmin(req);
   if (auth !== true) return NextResponse.json({ error: auth }, { status: 401 });
-  const bucket = serviceBucket();
+  let bucket;
+  try {
+    bucket = await serviceBucket();
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not access training-data storage." }, { status: 500 });
+  }
   if (!bucket) return NextResponse.json({ error: "Server is missing SUPABASE_SERVICE_ROLE_KEY." }, { status: 500 });
   const { data, error } = await bucket.list("historical", { limit: 10 });
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
@@ -125,7 +148,12 @@ export async function POST(req: Request) {
     }
   }
 
-  const bucket = serviceBucket();
+  let bucket;
+  try {
+    bucket = await serviceBucket();
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not access training-data storage." }, { status: 500 });
+  }
   if (!bucket) return NextResponse.json({ error: "Server is missing SUPABASE_SERVICE_ROLE_KEY." }, { status: 500 });
 
   await clearHistorical(bucket);
@@ -137,7 +165,12 @@ export async function POST(req: Request) {
     contentType: isCsv ? "text/csv" : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     upsert: true,
   });
-  if (upErr) return NextResponse.json({ error: upErr.message }, { status: 500 });
+  if (upErr) {
+    return NextResponse.json(
+      { error: `Training-data upload failed in Supabase Storage: ${upErr.message}` },
+      { status: 502 },
+    );
+  }
 
   return NextResponse.json({ ok: true, name: file.name, size: file.size, ...(warning ? { warning } : {}) });
 }
@@ -145,7 +178,12 @@ export async function POST(req: Request) {
 export async function DELETE(req: Request) {
   const auth = await assertAdmin(req);
   if (auth !== true) return NextResponse.json({ error: auth }, { status: 401 });
-  const bucket = serviceBucket();
+  let bucket;
+  try {
+    bucket = await serviceBucket();
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not access training-data storage." }, { status: 500 });
+  }
   if (!bucket) return NextResponse.json({ error: "Server is missing SUPABASE_SERVICE_ROLE_KEY." }, { status: 500 });
   // Clear the whole folder - the stored name now tracks the upload, so the
   // old fixed names cannot be relied on to find it.
