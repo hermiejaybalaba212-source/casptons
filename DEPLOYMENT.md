@@ -46,7 +46,8 @@ git push -u origin main
 2. Click **Add New → Project**.
 3. Select your `scholar-capstone` repo.
 4. Vercel auto-detects Next.js. **Framework: Next.js**.
-5. Under **Environment Variables**, add:
+5. Under **Environment Variables**, add these values for **Production** (and
+   **Preview** if you test preview deployments):
    - `NEXT_PUBLIC_SUPABASE_URL` = your Supabase project URL (`https://xxxx.supabase.co`)
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY` = your anon key
    - `NEXT_PUBLIC_REGISTRAR_SUPABASE_URL` = your registrar Supabase project URL
@@ -57,6 +58,10 @@ git push -u origin main
    - `PYTHON_BIN` = optional, only if the runner's Python is not on `PATH`
 6. Click **Deploy**. When done you get a URL like `https://scholar-capstone.vercel.app`.
 
+> Do not upload `.env.local` or paste it into GitHub. Use [env.example](env.example)
+> as the safe template, and add each real value separately in Vercel. After changing
+> an environment variable, redeploy so the new value is available to server functions.
+
 > The ML ranking page calls the same-origin `/api/ml/ocr-rank` route, which is bound to the
 > `ml` service through `ML_URL` — no backend URL to configure by hand.
 
@@ -65,11 +70,7 @@ git push -u origin main
 ## Local `.env.local`
 
 ```bash
-NEXT_PUBLIC_SUPABASE_URL=https://xxxx.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
-NEXT_PUBLIC_REGISTRAR_SUPABASE_URL=https://yyyy.supabase.co
-NEXT_PUBLIC_REGISTRAR_SUPABASE_ANON_KEY=eyJ...
-SUPABASE_SERVICE_ROLE_KEY=eyJ...        # main project, server-side only
+copy env.example .env.local
 ```
 
 `.env.local` is gitignored — never commit it or the service_role key.
