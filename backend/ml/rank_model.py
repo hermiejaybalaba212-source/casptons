@@ -588,11 +588,12 @@ def load_external(path=None, required: bool = False) -> Optional[Dict]:
 
 
 def _income_for_sort(item: Dict) -> float:
-    """Tie-break: the figure the ranking actually used, else the declared one.
+    """Return the effective annual income used by the rank-order policy.
 
     ``annual_income_family`` is the raw TOINC / annual income that the file
     rows carry - it must be checked, or every train-mode row ties at inf and
-    Rank 1 stops being the lowest-income household.
+    Rank 1 stops being the lowest-income household. OCR-corrected income takes
+    precedence; rows with no usable income sort last.
     """
     for key in ("income_used", "declared_income", "annual_income_family", "ocr_income"):
         value = item.get(key)
@@ -699,13 +700,13 @@ def predict(rows: List[Dict], trained: Dict) -> List[Dict]:
             }
         )
 
-    # Original ranking order: ITR-verified applicants first, then by the
-    # Random Forest priority score (Rank 1 = most in need).
+    # OCR is used to correct the income when its read is reliable. Rank by
+    # that effective annual income directly so Rank 1 is always the lowest
+    # income; model scores and ITR-match status remain visible for analytics.
     ranked.sort(
         key=lambda item: (
-            0 if item["itr_verified"] else 1,
-            -item["priority_score"],
             _income_for_sort(item),
+            -item["priority_score"],
         )
     )
     for position, item in enumerate(ranked, start=1):

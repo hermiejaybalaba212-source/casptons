@@ -46,16 +46,24 @@ Output (stdout, one JSON object per line): `start`, `log`, `doc`, `doc_result`,
 `scan_progress`, `scan_analytics`, `preprocess`, `train`, `rank`, `done`, `error`.
 Every event carries `t` = seconds since the process started.
 
-## Priority model
+## Training and applicant ranking
 
-`priority_target = 0.60 * financial_need_score + 0.25 * ocr_match_pct + 0.15 * academic_norm`
+The uploaded-file training uses the Colab notebook's five income-derived
+features and binary target (`NPCINC <= 4`), with the same 80/20 stratified
+split, seed 42, 200 trees, depth 3 and minimum leaf size 200. If a program is
+selected when **Execute AI Ranking** is clicked, the pipeline scans that
+program's ITRs, freshly trains from the uploaded file only, and ranks those
+applicants with that same model. With no program selected, the action performs
+file-only training and displays its evaluation and dataset analytics.
 
-- `financial_need_score` - 100 at or below the income floor (100k), 0 at the ceiling (600k).
-- `ocr_match_pct` - how close the OCR figure is to the declared income (`1 - diff/max`).
-- `academic_norm` - normalised SHS GWA / college GPA.
-
-The regressor predicts `priority_score` (sorted descending -> Rank 1) and the
-classifier reports `High Need` / `Low Need`.
+The classifier reports its predicted priority class and probability; the
+companion regressor reports a priority score. The final applicant order is
+deterministically sorted by the effective annual family income, ascending:
+a reliable OCR-read ITR amount corrects the typed amount, otherwise the
+declared amount is used. Thus Rank 1 is the applicant with the lowest usable
+annual income, and rows without any usable income sort last. OCR match status,
+model probability and priority score remain visible as separate review
+analytics; a mismatch does not silently place a higher-income applicant first.
 
 The dataset summary and model analytics are stored inside the deployed model
 artifact in Supabase Storage. Accuracy, precision, recall, F1, ROC-AUC, R², and
@@ -63,8 +71,9 @@ RMSE are evaluated only on held-out rows with an observed `NPCINC` target
 (`NPCINC <= 4`); income-derived proxy labels are used for ranking but never
 reported as independent model-quality metrics. If the uploaded dataset has no
 observed `NPCINC` labels, the UI says independent evaluation is unavailable.
-Later program rankings load and display the same saved model analytics; OCR
-analytics are separate and cover only the selected program's linked ITR files.
+Model-evaluation analytics and live OCR/ranking analytics are displayed
+separately so validation against held-out training labels is not confused with
+the current applicants' OCR match results.
 
 ## Performance on the reference machine (AMD Athlon 300GE, 2C/4T)
 

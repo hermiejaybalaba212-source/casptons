@@ -405,9 +405,11 @@ def main() -> int:
     # n_synth=0 so the forest fits on the uploaded file exactly as the Colab
     # notebook does, with no synthetic rows blended in.
     n_synth = int(payload["n_synth"]) if payload.get("n_synth") is not None else cfg.DEFAULT_SYNTH_SAMPLES
-    if mode == "train":
-        # Execute Training Data must reproduce the uploaded Colab dataset only.
-        # Do not allow a caller to blend synthetic or bundled sample rows into it.
+    train_uploaded = bool(payload.get("train_uploaded"))
+    train_from_upload = mode == "train" or train_uploaded
+    if train_from_upload:
+        # A run that explicitly trains from the uploaded file must reproduce
+        # the Colab dataset only, without synthetic or bundled sample rows.
         n_synth = 0
     # Optional forest knobs - the "train" mode UI sends the Colab notebook's
     # hyperparameters (200 trees, max_depth 3, min_samples_leaf 200).
@@ -450,10 +452,10 @@ def main() -> int:
         scan_results: dict = {}
         scan_stats: dict = {}
 
-        # "train" = the Machine learning train data panel's Execute ranking:
-        # no program selection, no OCR, no Supabase applicants. The uploaded
-        # file IS the dataset - it trains the forest and its own rows are the
-        # ones ranked, exactly like the Colab notebook proof-of-dataset run.
+        # "train" = file-only training without applicants; the uploaded file is
+        # trained and its own rows are returned for a dataset proof.
+        # "rank" + train_uploaded = fit the uploaded file first, then scan and
+        # rank this program's live applicants with that same freshly-fit model.
         if mode == "train":
             log(
                 "Train-only run (Machine learning train data): skipping the OCR scan - "
@@ -467,7 +469,7 @@ def main() -> int:
                 {
                     "type": "log",
                     "msg": f"Found {len(docs)} ITR document(s) to scan "
-                    f"({len(applicants)} applicant(s) with an uploaded ITR)",
+                    f"({sum(bool(applicant.get('itr_path')) for applicant in applicants)} applicant(s) with an uploaded ITR)",
                 }
             )
             if not docs:
@@ -519,11 +521,14 @@ def main() -> int:
         ranking: list = []
         training: dict = {}
         if mode in ("rank", "full", "train"):
+            csv_rows: list = []
+            feature_columns = (
+                ft.NOTEBOOK_FEATURE_COLUMNS if train_from_upload else ft.FEATURE_COLUMNS
+            )
             if mode == "train":
                 # No Supabase applicants in this mode: the uploaded training
-                # file is the whole dataset. Its rows are preprocessed with the
-                # same feature builder, the forest trains on them, and they are
-                # the rows that come back ranked (proof of dataset).
+                # file is the whole dataset. Its rows are also returned as a
+                # proof of which data the forest was fitted on.
                 from ml import csv_data as _csv_data
 
                 csv_rows, csv_warnings = _csv_data.load_training_csv(
@@ -551,6 +556,34 @@ def main() -> int:
                 by_app = index_by_application(scan_results)
                 rows = [ft.build_row(applicant, by_app.get(int(applicant["application_id"]))) for applicant in applicants]
 
+                if train_uploaded:
+                    from ml import csv_data as _csv_data
+
+                    csv_rows, csv_warnings = _csv_data.load_training_csv(
+                        income_ranked=True,
+                        uploaded_only=True,
+                    )
+                    if not csv_rows:
+                        raise ValueError(
+                            "No usable training rows in the uploaded file. Upload a CSV / Excel "
+                            "with an annual_income column in 'Machine learning train data' first."
+                        )
+                    for warning in csv_warnings:
+                        log(warning)
+                    incomes = [
+                        row.get("annual_income_family")
+                        for row in csv_rows
+                        if row.get("annual_income_family") is not None
+                    ]
+                    log(
+                        f"Training from uploaded file only: loaded {len(csv_rows)} row(s) "
+                        f"({len(incomes)} with annual family income)."
+                    )
+                    log(
+                        "Using the uploaded FIES/school file as the sole training dataset; "
+                        "the same freshly trained model will score this program's applicants."
+                    )
+
                 corrected = [r for r in rows if r.get("income_corrected")]
                 for item in corrected:
                     log(
@@ -565,31 +598,27 @@ def main() -> int:
 
                 comparable = [r for r in rows if r["ocr_status"] == "match"]
                 log(
-                    f"Preprocessing {len(rows)} applicant(s) -> {len(ft.FEATURE_COLUMNS)} features "
+                    f"Preprocessing {len(rows)} applicant(s) -> {len(feature_columns)} features "
                     f"with NumPy (median imputation)."
                 )
                 log(
                     f"Financial-need / OCR-alignment check: {len(comparable)} of {len(rows)} applicant(s) "
                     f"match their uploaded ITR exactly."
                 )
-                log(
-                    "Training basis: the uploaded historical dataset (de-duplicated + cleaned) "
-                    "trains the Random Forest FIRST; applicants are ranked AFTER that training."
-                )
-                verified = [r for r in rows if ft.itr_trust(r) == "verified"]
-                unverified = len(rows) - len(verified)
-                log(
-                    f"Trust gate: {len(verified)} applicant(s) verified against their ITR are ranked first; "
-                    f"{unverified} with a mismatching or missing ITR are ranked last."
-                )
+                if not train_uploaded:
+                    log(
+                        "Training basis: the saved model is used when available; otherwise "
+                        "the bundled historical sample and synthetic rows train a fallback model."
+                    )
 
-            X, medians = ft.matrix(rows)
+            X, medians = ft.matrix(rows, columns=feature_columns)
             emit(
                 {
                     "type": "preprocess",
-                    "feature_columns": ft.FEATURE_COLUMNS,
+                    "feature_columns": feature_columns,
                     "matrix_shape": list(X.shape),
                     "medians": {k: round(float(v), 4) for k, v in medians.items()},
+                    "row_label": "training" if mode == "train" else "applicant",
                     "rows": [
                         {
                             "application_id": r.get("application_id"),
@@ -613,12 +642,12 @@ def main() -> int:
             mode_choice = (os.environ.get(cfg.MODEL_MODE_ENV) or "auto").strip().lower()
             external = None
             external_error = None
-            if mode == "train":
-                # The whole point of the train-data panel is a fresh fit on the
-                # uploaded file - never reuse the externally trained artifact.
+            if train_from_upload:
+                # This run explicitly requests a fresh fit on the current upload,
+                # never a potentially stale deployed artifact.
                 log(
-                    "Train-only run: fitting a fresh Random Forest on the uploaded file "
-                    "(the external model shortcut is bypassed)."
+                    "Uploaded-data training: fitting a fresh Random Forest on the current file "
+                    "(the external-model shortcut is bypassed)."
                 )
             else:
                 try:
@@ -646,22 +675,28 @@ def main() -> int:
             else:
                 if external_error:
                     log(f"External model unavailable: {external_error}")
-                log(
-                    f"Training Random Forest ({n_trees} trees, seed {seed}) on "
-                    f"{n_synth} synthetic + {len(rows)} real rows..."
-                )
+                if train_from_upload:
+                    log(
+                        f"Training Random Forest ({n_trees} trees, seed {seed}) "
+                        f"on {len(csv_rows)} uploaded rows only..."
+                    )
+                else:
+                    log(
+                        f"Training Random Forest ({n_trees} trees, seed {seed}) on "
+                        f"{n_synth} synthetic + {len(rows)} real rows..."
+                    )
                 # rank_model.train() loads the uploaded training CSV itself - in
                 # "train" mode those exact rows are already in `rows`, so pass an
                 # empty real list to avoid counting the file twice.
                 training = rank_model.train(
-                    [] if mode == "train" else rows,
+                    [] if mode == "train" or train_uploaded else rows,
                     seed=seed, n_trees=n_trees, n_synth=n_synth,
                     max_depth=max_depth, min_samples_leaf=min_samples_leaf,
-                    income_ranked=(mode == "train"),
-                    csv_rows_override=rows if mode == "train" else None,
-                    # Train-only = the Colab notebook exactly: fit on the five
-                    # TOINC-derived columns and nothing else.
-                    columns=list(ft.NOTEBOOK_FEATURE_COLUMNS) if mode == "train" else None,
+                    income_ranked=train_from_upload,
+                    csv_rows_override=csv_rows if train_from_upload else None,
+                    # Uploaded-data training matches the notebook's five
+                    # TOINC-derived features and training parameters.
+                    columns=list(ft.NOTEBOOK_FEATURE_COLUMNS) if train_from_upload else None,
                 )
                 if training.get("n_csv"):
                     log(
@@ -687,8 +722,8 @@ def main() -> int:
                 if training.get("deployed_path") and training.get("persisted"):
                     log(
                         f"Persisted to Storage and deployed for the main AI-Ranking -> {training['deployed_path']}. "
-                        "Step 1 -> Step 2 'Execute AI Ranking' will now score applicants "
-                        "with this trained model (OCR + ITR / annual income) instead of retraining."
+                        "This run scores applicants with the same freshly trained model; "
+                        "later rankings can reuse the saved model."
                     )
                 elif training.get("deployed_path"):
                     log(

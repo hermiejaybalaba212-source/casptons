@@ -221,11 +221,11 @@ def itr_income_bracket(income: Optional[float]) -> float:
 
 
 def itr_trust(row: Dict) -> str:
-    """Trust gate: 'verified' | 'mismatch' | 'no_itr'.
+    """ITR comparison status for analytics: 'verified' | 'mismatch' | 'no_itr'.
 
     An applicant is only 'verified' when an ITR was uploaded and the income
     the applicant typed matches the figure OCR read from it (>= OCR_TRUST_MIN_PCT).
-    Everyone else is ranked after the verified group.
+    This status is shown for review; it does not override income-based ordering.
     """
     has_itr = bool(row.get("itr_path")) or bool(row.get("has_itr"))
     if not has_itr:
@@ -254,8 +254,8 @@ def priority_target(row: Dict) -> float:
     """Ground-truth priority (0-100) the Random Forest learns.
 
     Base score = financial need from the income the OCR read from the ITR
-    (W_NEED = 1.0; academic grades and the OCR match stay out of the score -
-    the match is only the trust gate). On top of that, every *declared*
+    (W_NEED = 1.0; academic grades and OCR match stay out of the score).
+    On top of that, every *declared*
     statutory priority flag adds its points, so an applicant - or a
     historical row - with no ITR and no income still gets a documented
     score instead of a flat neutral one.

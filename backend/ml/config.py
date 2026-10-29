@@ -89,13 +89,12 @@ INCOME_CEIL = 600_000.0        # annual family income -> need score 0
 HIGH_NEED_INCOME = 150_000.0   # app-wide "High Need" cut-off (matches lib/ml)
 
 # --- composite priority target (what the regressor learns) ---------------
-# The ranking is based on financial need only (the income read from the ITR).
-# Academic grades are deliberately NOT part of the scholarship ranking, and
-# the OCR match percentage acts as a trust gate (OCR_TRUST_MIN_PCT) instead
-# of a score component: applicants whose typed income does not match their
-# ITR (or who uploaded no ITR at all) are placed after the verified ones.
+# Priority scores are based on financial need only (the income read from the
+# ITR). Academic grades and OCR match are not score components. The final
+# applicant ordering uses the effective annual income directly, lowest first;
+# the OCR match percentage is retained as a validation signal for review.
 W_NEED = 1.00                  # financial need score (driven by the ITR income)
-W_OCR = 0.00                   # trust gate only - never adds score
+W_OCR = 0.00                   # comparison is for review, not a score component
 W_ACADEMIC = 0.00              # academics excluded on purpose
 
 OCR_TRUST_MIN_PCT = 90.0       # typed vs ITR align >= this % = "ITR verified"

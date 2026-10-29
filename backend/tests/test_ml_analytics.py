@@ -2,6 +2,9 @@ import sys
 import tempfile
 import unittest
 from io import BytesIO
+import contextlib
+import io
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,7 +18,7 @@ import joblib
 from ml import features
 from ml.csv_data import _resolve, row_from
 from ml.pipeline import build_docs
-from ml.rank_model import load_external, train
+from ml.rank_model import load_external, predict, train
 from ml.service import MAX_SHEET_BYTES, _parse_sheet
 
 
@@ -26,6 +29,14 @@ class ForestStub:
 
     def predict(self, rows):
         return [0 for _ in rows]
+
+
+class FixedScoreRegressor:
+    def __init__(self, scores):
+        self.scores = scores
+
+    def predict(self, rows):
+        return self.scores
 
 
 class RankingAnalyticsTests(unittest.TestCase):
@@ -245,6 +256,120 @@ class RankingAnalyticsTests(unittest.TestCase):
         self.assertIsNone(trained["accuracy"])
         self.assertIsNone(trained["f1"])
         self.assertIsNone(trained["roc_auc"])
+
+    def test_income_order_uses_reliable_ocr_income_before_match_status_or_model_score(self):
+        rows = [
+            {
+                "application_id": 1,
+                "income_used": 100_000,
+                "annual_income_family": 100_000,
+                "has_itr": 0,
+                "ocr_match_pct": 0,
+            },
+            {
+                "application_id": 2,
+                "income_used": 200_000,
+                "annual_income_family": 200_000,
+                "has_itr": 1,
+                "ocr_match_pct": 100,
+            },
+            {
+                "application_id": 3,
+                "income_used": 150_000,
+                "annual_income_family": 150_000,
+                "has_itr": 1,
+                "ocr_match_pct": 10,
+            },
+        ]
+        model = {
+            "regressor": FixedScoreRegressor([1, 100, 50]),
+            "classifier": None,
+            "feature_columns": ["annual_income_family"],
+            "medians": {"annual_income_family": 0},
+        }
+
+        ranked = predict(rows, model)
+
+        self.assertEqual([row["application_id"] for row in ranked], [1, 3, 2])
+        self.assertEqual([row["rank"] for row in ranked], [1, 2, 3])
+
+    def test_uploaded_training_and_ranking_uses_one_fresh_file_only_model(self):
+        from ml import csv_data, pipeline
+
+        training_rows = [{"annual_income_family": 90_000, "priority_target": 100}]
+        training_result = {
+            "classifier": object(),
+            "regressor": object(),
+            "medians": {},
+            "feature_columns": list(features.NOTEBOOK_FEATURE_COLUMNS),
+            "n_samples": 1,
+            "n_real": 0,
+            "n_synthetic": 0,
+            "n_csv": 1,
+            "n_trees": 200,
+            "seed": 42,
+            "evaluation": {"available": True, "source": "observed NPCINC <= 4", "n_test": 1, "n_train": 0},
+            "feature_importance": {},
+            "dataset": {"sources": {"csv": 1, "synthetic": 0, "real": 0}, "total": 1},
+            "model_path": "model.joblib",
+            "model_size_kb": 1,
+            "deployed_path": "scholarship_rf_model.joblib",
+            "persisted": True,
+            "train_ms": 1,
+            "csv_warnings": [],
+        }
+        ranked_rows = [
+            {
+                "application_id": 10,
+                "rank": 1,
+                "priority_score": 99,
+                "prediction": "High Need",
+                "financial_need_score": 96,
+                "ocr_match_pct": 0,
+                "income_used": 120_000,
+                "income_source": "declared",
+            }
+        ]
+        payload = {
+            "mode": "rank",
+            "train_uploaded": True,
+            "seed": 42,
+            "n_trees": 200,
+            "n_synth": 0,
+            "max_depth": 3,
+            "min_samples_leaf": 200,
+            "applicants": [
+                {
+                    "application_id": 10,
+                    "student_name": "Test Applicant",
+                    "declared_income": 120_000,
+                    "itr_path": None,
+                }
+            ],
+        }
+        output = io.StringIO()
+
+        with (
+            patch("sys.stdin", io.StringIO(json.dumps(payload))),
+            patch("sys.stdout", output),
+            patch.object(csv_data, "load_training_csv", return_value=(training_rows, [])),
+            patch.object(pipeline.storage, "list_all", return_value=[]),
+            patch.object(pipeline.rank_model, "train", return_value=training_result) as train_mock,
+            patch.object(pipeline.rank_model, "predict", return_value=ranked_rows) as predict_mock,
+        ):
+            result = pipeline.main()
+
+        self.assertEqual(result, 0, output.getvalue())
+        train_kwargs = train_mock.call_args.kwargs
+        self.assertEqual(train_kwargs["n_synth"], 0)
+        self.assertTrue(train_kwargs["income_ranked"])
+        self.assertEqual(train_kwargs["csv_rows_override"], training_rows)
+        self.assertEqual(train_kwargs["columns"], features.NOTEBOOK_FEATURE_COLUMNS)
+        predict_mock.assert_called_once()
+        events = [json.loads(line) for line in output.getvalue().splitlines() if line.startswith("{")]
+        self.assertTrue(any(event.get("type") == "train" for event in events))
+        self.assertTrue(any(event.get("type") == "rank" for event in events))
+        self.assertTrue(next(event for event in events if event.get("type") == "done")["ok"])
 
 
 if __name__ == "__main__":

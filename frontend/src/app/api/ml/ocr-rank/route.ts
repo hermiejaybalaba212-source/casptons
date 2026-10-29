@@ -26,6 +26,7 @@ interface PipelinePayload {
   n_synth?: number;
   max_depth?: number;
   min_samples_leaf?: number;
+  train_uploaded?: boolean;
   applicants?: Array<Record<string, unknown>>;
   ocr_results?: Array<Record<string, unknown>>;
 }
@@ -87,6 +88,7 @@ export async function POST(req: Request) {
     n_synth: payload.n_synth ?? 800,
     max_depth: payload.max_depth ?? 8,
     min_samples_leaf: payload.min_samples_leaf ?? 2,
+    train_uploaded: payload.train_uploaded === true,
     applicants: Array.isArray(payload.applicants) ? payload.applicants : [],
     ocr_results: Array.isArray(payload.ocr_results) ? payload.ocr_results : [],
   };

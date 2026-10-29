@@ -601,7 +601,9 @@ export default function MLRankingPage() {
   async function runPipeline(mode: "scan" | "rank" | "train") {
     const startedAt = Date.now();
     let localError = "";
-    const isTrain = mode === "train";
+    const runMode = mode === "rank" && !selectedProgramId && histFile ? "train" : mode;
+    const isTrain = runMode === "train";
+    const trainUploadedAndRank = runMode === "rank" && Boolean(histFile);
     if (!isTrain && !selectedProgramId) {
       setError("Select a scholarship program first — only that program's student applications are scanned and ranked.");
       return;
@@ -613,7 +615,7 @@ export default function MLRankingPage() {
     const programName = programs.find((p) => p.scholarship_id === selectedProgramId)?.scholarship_name || `program #${selectedProgramId}`;
     setMessage("");
     setError("");
-    setBusy(mode);
+    setBusy(runMode);
     setPhase("scanning");
     setElapsed(0);
     setProgress({ done: 0, total: 0 });
@@ -621,15 +623,22 @@ export default function MLRankingPage() {
     setLogLines([]);
     if (isTrain) {
       setOcrAnalytics(null);
+      setTrainInfo(null);
+      setRanked([]);
       pushLog({ msg: `Starting file-only training from "${histFile?.name}" (backend/ml/pipeline.py)...` });
       pushLog({ msg: "No program selection needed for training: the uploaded file is the only training dataset." });
       pushLog({ msg: "Colab-notebook setup: 200 trees, max_depth 3, min_samples_leaf 200, seed 42." });
     } else {
-      pushLog({ msg: `Starting ${mode === "scan" ? "OCR scan" : "OCR + Random Forest ranking"} (python ml/pipeline.py)...` });
+      pushLog({ msg: `Starting ${runMode === "scan" ? "OCR scan" : trainUploadedAndRank ? "OCR + uploaded-data training + Random Forest ranking" : "OCR + Random Forest ranking"} (python ml/pipeline.py)...` });
       pushLog({ msg: `Selected scholarship program: ${programName} (${selectedProgramId ? pendingByProgram[selectedProgramId] || 0 : 0} pending application(s)).` });
       pushLog({ msg: "Loading pending applicants from Supabase..." });
+      if (runMode === "rank") {
+        setOcrAnalytics(null);
+        setTrainInfo(null);
+        setRanked([]);
+      }
     }
-    if (mode === "scan") {
+    if (runMode === "scan") {
       setOcrAnalytics(null);
       setRanked([]);
       setTrainInfo(null);
@@ -649,15 +658,15 @@ export default function MLRankingPage() {
         return;
       }
       const eligible = applicants.filter((a) => a.hasItr && a.annual_income_family != null);
-      if (mode === "rank" && !eligible.length) {
+      if (runMode === "rank" && !eligible.length) {
         // Training must never be blocked by missing ITR / income: the Random
         // Forest still fits on the synthetic + historical rows, and every
         // applicant without income trains with the neutral need score (50).
         pushLog({
           msg:
             "No pending applicant has an uploaded ITR with income data - continuing anyway. "
-            + "Applicants without ITR / income train with a neutral need score (50) and rank "
-            + "after the verified group; the historical + synthetic rows still drive the model.",
+          + "Applicants without an OCR income use their declared income when available; "
+          + "rows with no income are placed last. The uploaded model still scores every applicant.",
         });
       }
 
@@ -701,10 +710,12 @@ export default function MLRankingPage() {
                 applicants: [],
               }
             : {
-          mode,
-          seed: 2026,
-          n_trees: 100,
-          n_synth: 800,
+          mode: runMode,
+          train_uploaded: trainUploadedAndRank,
+          seed: trainUploadedAndRank ? 42 : 2026,
+          n_trees: trainUploadedAndRank ? 200 : 100,
+          n_synth: trainUploadedAndRank ? 0 : 800,
+          ...(trainUploadedAndRank ? { max_depth: 3, min_samples_leaf: 200 } : {}),
           applicants: applicants.map((a) => ({
             application_id: a.application_id,
             student_name: a.student_name,
@@ -816,7 +827,8 @@ export default function MLRankingPage() {
             setOcrAnalytics(analytics);
             finalAnalytics = analytics;
           } else if (type === "preprocess") {
-            pushLog({ t: event.t as number | undefined, msg: `Preprocessed ${Array.isArray(event.rows) ? event.rows.length : 0} applicant(s) into ${Array.isArray(event.feature_columns) ? event.feature_columns.length : 0} features (NumPy + median imputation).` });
+            const rowLabel = event.row_label === "training" ? "training" : "applicant";
+            pushLog({ t: event.t as number | undefined, msg: `Preprocessed ${Array.isArray(event.rows) ? event.rows.length : 0} ${rowLabel} row(s) into ${Array.isArray(event.feature_columns) ? event.feature_columns.length : 0} features (NumPy + median imputation).` });
           } else if (type === "train") {
             setPhase("training");
             setTrainInfo(event as unknown as TrainInfo);
@@ -859,7 +871,7 @@ export default function MLRankingPage() {
         throw new Error("The OCR/ML pipeline closed before it finished. Check the Python environment.");
       }
 
-      if (mode === "rank" && finalRows.length) {
+      if (runMode === "rank" && finalRows.length) {
         setPhase("saving");
         const sb = getSupabase();
         const rows = finalRows.map((row, i) => ({
@@ -889,13 +901,15 @@ export default function MLRankingPage() {
         setError(localError);
       } else {
         setMessage(
-          mode === "scan"
+          runMode === "scan"
             ? `OCR scan finished in ${seconds}s \u2014 ${finalAnalytics?.income_detected ?? 0} of ${finalAnalytics?.documents_scanned ?? 0} ITR image(s) produced an income value.`
             : isTrain
               ? `Train-only run finished in ${seconds}s \u2014 the Random Forest fit on the uploaded file${
                   finalTrainInfo?.persisted ? " and the model plus analytics were saved to Storage" : ", but the model could not be saved to persistent Storage"
                 }.`
-              : `Ranking complete in ${seconds}s \u2014 ${finalRows.length} applicant(s) prioritized. Rank 1 = most in need of financial assistance.`,
+              : trainUploadedAndRank
+                ? `Training and ranking complete in ${seconds}s \u2014 the uploaded file trained the model, which then ranked ${finalRows.length} applicant(s) after OCR.`
+                : `Ranking complete in ${seconds}s \u2014 ${finalRows.length} applicant(s) prioritized. Rank 1 = lowest annual family income used.`,
         );
 
       }
@@ -906,7 +920,7 @@ export default function MLRankingPage() {
       // Keep a finished run's log + metrics on screen after the progress modal
       // closes, so the admin has proof of what the training / ranking did.
       setLastRun({
-        mode,
+        mode: runMode,
         finishedAt: new Date().toLocaleTimeString("en-PH"),
         logs: logLinesRef.current.slice(),
         trainInfo: finalTrainInfo,
@@ -1018,8 +1032,6 @@ export default function MLRankingPage() {
           const ocrPct = live?.ocr_match_pct ?? ocr?.match?.align_pct ?? null;
           const ocrStatus = live?.ocr_status ?? ocr?.match?.status ?? null;
           const needScore = live?.financial_need_score ?? ocr?.need_score ?? null;
-          const trust = live?.itr_trust ?? (ocr != null || ocr != null ? undefined : undefined);
-
           return {
             // --- ranking result (the executed ranking) ---
             rank: val(saving?.ranking_position),
@@ -1187,7 +1199,7 @@ export default function MLRankingPage() {
             <p className="text-sm font-bold text-[#241012]">AI OCR + Random Forest Ranking</p>
             <p className="mt-0.5 text-[11px] text-[#6B5458]">
               OCR reads each ITR linked to this program&rsquo;s applicants, then the Random Forest ranks them &middot;{" "}
-              <span className="font-semibold text-[#7B1113]">Rank 1 = most in need of financial assistance</span>
+              <span className="font-semibold text-[#7B1113]">Rank 1 = lowest reliable annual family income</span>
               {selectedProgramId && (
                 <>
                   {" \u00b7 "}
@@ -1229,28 +1241,52 @@ export default function MLRankingPage() {
             Step 2
           </span>
           <button
-            onClick={() => runPipeline("rank")}
-            disabled={!!busy || !selectedProgramId || !(selectedProgramId && pendingByProgram[selectedProgramId])}
+            onClick={() => runPipeline(selectedProgramId ? "rank" : "train")}
+            disabled={
+              !!busy ||
+              (selectedProgramId
+                ? !pendingByProgram[selectedProgramId]
+                : !histFile)
+            }
             className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-[#7B1113] to-[#540111] px-4 py-2 text-xs font-bold text-white shadow-md transition hover:brightness-110 active:scale-[0.99] disabled:opacity-50"
-            title={selectedProgramId ? "Runs the OCR scan of every ITR, then the Random Forest ranking - one click" : "Choose a scholarship program first"}
+            title={
+              selectedProgramId
+                ? histFile
+                  ? "Scans this program's ITRs, trains a fresh model from the uploaded file only, then ranks applicants with that same model."
+                  : "Runs the OCR scan of every ITR, then the Random Forest ranking."
+                : histFile
+                  ? "Runs file-only training and displays training analytics; choose a program afterward to scan ITRs and rank applicants."
+                  : "Upload a training file or choose a scholarship program."
+            }
           >
             <span aria-hidden>&#9654;</span>
             {busy === "rank"
-              ? "Executing OCR + Random Forest..."
-              : selectedProgramId
-                ? `Execute AI Ranking (${pendingByProgram[selectedProgramId] || 0} pending)`
-                : "Execute AI Ranking (select a program)"}
+              ? histFile
+                ? "Training file + ranking..."
+                : "Executing OCR + Random Forest..."
+              : busy === "train"
+                ? "Training uploaded data..."
+                : selectedProgramId
+                  ? histFile
+                    ? `Train file + Execute AI Ranking (${pendingByProgram[selectedProgramId] || 0})`
+                    : `Execute AI Ranking (${pendingByProgram[selectedProgramId] || 0} pending)`
+                  : histFile
+                    ? "Execute Training Data"
+                    : "Upload training data or select a program"}
           </button>
           <span className="ml-auto text-[11px] text-[#6B5458]">
             {selectedProgramId ? (
               <>
-                Scans &amp; ranks only <b className="text-[#7B1113]">{pendingByProgram[selectedProgramId] || 0}</b>{" "}
-                pending application(s) of this program.
+                {histFile
+                  ? <>Trains on the uploaded file, scans &amp; ranks <b className="text-[#7B1113]">{pendingByProgram[selectedProgramId] || 0}</b> pending application(s) of this program.</>
+                  : <>Scans &amp; ranks only <b className="text-[#7B1113]">{pendingByProgram[selectedProgramId] || 0}</b> pending application(s) of this program.</>}
               </>
+            ) : histFile ? (
+              <>No program selected: this runs uploaded-file training and its analytics only. Choose a program afterward to run OCR + applicant ranking.</>
             ) : (
               <>
                 <b className="text-[#7B1113]">{pendingCount}</b> pending application(s) across all programs &mdash;
-                pick a program in Step 1.
+                upload the training file or pick a program in Step 1.
               </>
             )}
           </span>
@@ -1266,14 +1302,14 @@ export default function MLRankingPage() {
               Need comes from the OCR-scanned ITR &mdash; grades are not used.
             </p>
             <p className="rounded-lg bg-[#FAF7F5]/70 px-3 py-2">
-              <b className="text-[#241012]">2. Verified applicants first</b>
+              <b className="text-[#241012]">2. OCR-corrected income</b>
               <br />
-              Typed income matching the ITR (&ge;90%) ranks in front.
+              A reliable ITR read corrects typed income before the model ranks applicants.
             </p>
             <p className="rounded-lg bg-[#FAF7F5]/70 px-3 py-2">
-              <b className="text-[#241012]">3. Mismatch or no ITR last</b>
+              <b className="text-[#241012]">3. Lowest income first</b>
               <br />
-              0% match or no upload goes after the verified group.
+              Applicants sort by annual family income used; OCR match is shown for review, not a rank gate.
             </p>
           </div>
           <p className="mt-2 text-[11px] leading-5 text-[#6B5458]">
@@ -1288,11 +1324,11 @@ export default function MLRankingPage() {
           <div>
             <p className="text-sm font-bold text-[#241012]">Machine learning train data</p>
             <p className="mt-0.5 text-[11px] text-[#6B5458]">
-              Upload the PSA FIES workbook (or the school&rsquo;s past applications) and click{" "}
-              <b className="text-[#7B1113]">Execute Training Data</b> &mdash; it trains on{" "}
-              <b className="text-[#241012]">your file only</b>, exactly like the Google Colab notebook, then
-              deploys that model for the main <b className="text-[#241012]">Execute AI Ranking</b> (OCR + ITR / annual income).
-              <b className="text-[#241012]"> No program selection is needed for this training step.</b>
+              Upload the PSA FIES workbook (or the school&rsquo;s past applications). With no program selected,
+              the main action runs file-only training and shows its analytics. With a program selected, the main
+              action trains from <b className="text-[#241012]">this uploaded file only</b>, scans linked ITRs,
+              then ranks those applicants using that same freshly-trained model.
+              <b className="text-[#241012]"> The separate Execute Training Data button remains available for training-only runs.</b>
               <br />
               Reads <code className="rounded bg-[#241012]/[0.05] px-1">TOINC</code> (annual family income) &rarr; 5 features,
               target <code className="rounded bg-[#241012]/[0.05] px-1">NPCINC &le; 4</code>; falls back to{" "}
@@ -1349,7 +1385,7 @@ export default function MLRankingPage() {
             <span>
               Using <b className="text-[#241012]">{histFile.name}</b> ({Math.max(1, Math.round(histFile.size / 1024))} KB)
               {histFile.updated_at ? ` \u00b7 updated ${new Date(histFile.updated_at).toLocaleDateString("en-PH")}` : ""}
-              {" \u00b7 "}used only when you click Execute Training Data{" "}
+              {" \u00b7 "}used to train the model; with a program selected, the main action trains from this file and ranks applicants in the same run{" "}
               <span className="text-[#7B1113]">
                 &mdash; watch the scan log for &quot;Loaded N historical training row(s)&quot; to confirm this file was read.
               </span>
@@ -1643,7 +1679,11 @@ export default function MLRankingPage() {
         <EmptyState
           icon="&#129302;"
           title="No ranking generated yet"
-          hint="Select a program, then click Execute AI Ranking — OCR scans only the ITRs linked to applicants in that program."
+          hint={
+            histFile
+              ? "With no program selected, click Execute Training Data to fit and evaluate the uploaded file. Select a program to train from that file, scan linked ITRs, and rank applicants in one run."
+              : "Select a program, then click Execute AI Ranking — OCR scans only the ITRs linked to applicants in that program."
+          }
         />
       ) : (
         <div className="overflow-hidden rounded-2xl border border-[#241012]/[0.07] bg-white shadow-sm">
@@ -1673,10 +1713,10 @@ export default function MLRankingPage() {
                   return pname ? `${pname} \u00b7 ` : "";
                 })()}
                 {ranked.length} applicant{ranked.length === 1 ? "" : "s"} ranked &middot;{" "}
-                <span className="font-semibold text-[#7B1113]">Rank 1 = most in need of financial assistance</span>
+                <span className="font-semibold text-[#7B1113]">Rank 1 = lowest annual family income used</span>
                 {" \u00b7 "}
                 <span className="text-[#6B5458]">
-                  ITR-verified applicants ranked first; no ITR / mismatch ranked last
+                  reliable OCR income corrects typed income; match status remains visible for review
                 </span>
               </p>
             </div>
@@ -2045,16 +2085,16 @@ function RankRow({
     row.itr_trust ?? (row.itr_path ? "mismatch" : "no_itr");
   const matchChip =
     trust === "verified"
-      ? { cls: "bg-[#D1FAE5] text-[#065F46] ring-[#059669]/30", dot: "bg-emerald-500", text: `${pct(row.ocr_match_pct, 1)} \u2713`, title: "Typed income matches the scanned ITR - ranked in the verified group" }
+      ? { cls: "bg-[#D1FAE5] text-[#065F46] ring-[#059669]/30", dot: "bg-emerald-500", text: `${pct(row.ocr_match_pct, 1)} \u2713`, title: "Typed income matches the scanned ITR; ranking is by annual income used" }
       : trust === "mismatch"
-        ? { cls: "bg-[#FEF3C7] text-[#92400E] ring-[#D97706]/30", dot: "bg-amber-500", text: `${pct(row.ocr_match_pct, 1)} \u2717`, title: "Typed income does not match the ITR - ranked after the verified applicants" }
-        : { cls: "bg-gray-100 text-gray-600 ring-gray-300/50", dot: "bg-gray-400", text: "No ITR", title: "No ITR uploaded - ranked after the verified applicants" };
+        ? { cls: "bg-[#FEF3C7] text-[#92400E] ring-[#D97706]/30", dot: "bg-amber-500", text: `${pct(row.ocr_match_pct, 1)} \u2717`, title: "Typed income differs from the ITR; a reliable OCR read corrects the income used for ranking" }
+        : { cls: "bg-gray-100 text-gray-600 ring-gray-300/50", dot: "bg-gray-400", text: "No ITR", title: "No ITR uploaded; declared annual income is used when available" };
   const trustNote =
     trust === "verified"
-      ? `Matches the ITR (${pct(row.ocr_match_pct, 1)}) - verified applicant`
+      ? `Typed income matches the ITR (${pct(row.ocr_match_pct, 1)})`
       : trust === "mismatch"
-        ? `Typed income differs from the ITR (${pct(row.ocr_match_pct, 1)}) - ranked after verified`
-        : "No ITR uploaded - ranked after verified";
+        ? `Typed income differs from the ITR (${pct(row.ocr_match_pct, 1)}); a reliable OCR figure is used`
+        : "No ITR uploaded; declared income is used when available";
   return (
     <>
       <tr
@@ -2155,10 +2195,8 @@ function RankRow({
               <div className="rounded-xl border border-[#241012]/[0.06] bg-white p-3.5">
                 <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wide text-[#6B5458]">Model inputs</p>
                 <p className="flex justify-between gap-2 py-0.5">
-                  <span>Ranking group</span>
-                  <b className={trust === "verified" ? "text-emerald-700" : "text-amber-700"}>
-                    {trust === "verified" ? "ITR verified (ranked first)" : "After verified (ranked last)"}
-                  </b>
+                  <span>Income ordering</span>
+                  <b className="text-[#7B1113]">Lowest annual income first</b>
                 </p>
                 <p className="flex justify-between gap-2 py-0.5">Financial need score <b>{row.financial_need_score.toFixed(1)}</b></p>
                 <p className="flex justify-between gap-2 py-0.5">OCR match score <b>{row.ocr_match_pct.toFixed(2)}</b></p>
