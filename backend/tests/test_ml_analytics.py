@@ -1,8 +1,12 @@
 import sys
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
+
+from fastapi import HTTPException
+from openpyxl import Workbook
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -12,6 +16,7 @@ from ml import features
 from ml.csv_data import _resolve, row_from
 from ml.pipeline import build_docs
 from ml.rank_model import load_external, train
+from ml.service import MAX_SHEET_BYTES, _parse_sheet
 
 
 class ForestStub:
@@ -24,6 +29,41 @@ class ForestStub:
 
 
 class RankingAnalyticsTests(unittest.TestCase):
+    def test_sheet_reader_parses_upload_bytes(self):
+        parsed = _parse_sheet(
+            "previous-applications.csv",
+            b"Student ID,Program,Year Level\n1001,Computer Science,2\n1002,Nursing,3\n",
+        )
+
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["columns"], ["Student ID", "Program", "Year Level"])
+        self.assertEqual(parsed["row_count"], 2)
+        self.assertEqual(parsed["year_kind"], "level")
+
+    def test_sheet_reader_parses_excel_upload_bytes(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.append(["Student ID", "Program", "Year Level"])
+        worksheet.append([1001, "Computer Science", 2])
+        content = BytesIO()
+        workbook.save(content)
+
+        parsed = _parse_sheet("previous-applications.xlsx", content.getvalue())
+
+        self.assertTrue(parsed["ok"])
+        self.assertEqual(parsed["row_count"], 1)
+        self.assertEqual(parsed["rows"][0]["Student ID"], "1001")
+        self.assertEqual(parsed["year_kind"], "level")
+
+    def test_sheet_reader_rejects_bad_type_and_oversized_upload(self):
+        with self.assertRaises(HTTPException) as bad_type:
+            _parse_sheet("legacy.xls", b"")
+        with self.assertRaises(HTTPException) as too_large:
+            _parse_sheet("oversized.csv", b"x" * (MAX_SHEET_BYTES + 1))
+
+        self.assertEqual(bad_type.exception.status_code, 400)
+        self.assertEqual(too_large.exception.status_code, 413)
+
     def test_training_loader_marks_observed_npcinc_labels_separately(self):
         resolved = _resolve({"toinc": "TOINC", "npcinc": "NPCINC"})
         observed = row_from({"TOINC": "120000", "NPCINC": "4"}, resolved, income_ranked=True)

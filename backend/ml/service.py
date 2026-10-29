@@ -9,16 +9,18 @@ as JSON and receive the same NDJSON event stream pipeline.py writes to stdout.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 from typing import Iterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 ML_DIR = Path(__file__).resolve().parent
@@ -31,6 +33,8 @@ NDJSON_HEADERS = {
 _EOF = object()
 
 app = FastAPI(title="scholar-capstone2 ML pipeline", version="1.0.0")
+MAX_SHEET_BYTES = 20 * 1024 * 1024
+SHEET_EXTENSIONS = {".csv", ".xlsx", ".xlsm", ".xltx"}
 
 
 def _runtime_python() -> tuple[str, dict[str, str]]:
@@ -56,6 +60,59 @@ def _runtime_python() -> tuple[str, dict[str, str]]:
 @app.get("/")
 def health() -> JSONResponse:
     return JSONResponse({"ok": True, "service": "ml", "python": sys.version.split()[0]})
+
+
+def _parse_sheet(filename: str, contents: bytes) -> dict:
+    safe_name = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    suffix = Path(safe_name).suffix.lower()
+    if suffix not in SHEET_EXTENSIONS:
+        raise HTTPException(status_code=400, detail="Unsupported file type. Use .csv or .xlsx.")
+    if len(contents) > MAX_SHEET_BYTES:
+        raise HTTPException(status_code=413, detail="File must be 20 MB or smaller.")
+
+    python_bin, runtime_env = _runtime_python()
+    with tempfile.TemporaryDirectory(prefix="sheet-") as work_dir:
+        upload_path = Path(work_dir) / f"upload{suffix}"
+        upload_path.write_bytes(contents)
+        try:
+            result = subprocess.run(
+                [python_bin, str(ML_DIR / "read_sheet.py"), str(upload_path)],
+                cwd=str(ML_DIR),
+                env=runtime_env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=45,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise HTTPException(status_code=504, detail="Reading this file took too long.") from exc
+
+    if not result.stdout.strip():
+        errors = result.stderr.strip().splitlines()
+        raise HTTPException(
+            status_code=500,
+            detail=errors[-1] if errors else "The sheet reader returned no output.",
+        )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="The sheet reader returned invalid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="The sheet reader returned an invalid response.")
+    if result.returncode != 0 or payload.get("ok") is not True:
+        raise HTTPException(status_code=400, detail=str(payload.get("error") or "Could not read this file."))
+    return payload
+
+
+@app.post("/parse-sheet")
+async def parse_sheet(request: Request) -> JSONResponse:
+    filename = request.headers.get("x-file-name", "")
+    if not filename:
+        raise HTTPException(status_code=400, detail="Missing x-file-name header.")
+    contents = await request.body()
+    return JSONResponse(await asyncio.to_thread(_parse_sheet, filename, contents))
 
 
 @app.post("/pipeline")

@@ -34,6 +34,7 @@ last so it replaces the stock ONNX runtime).
 - `rank_model.py` - synthetic training rows, RandomForest fit, metrics, joblib dump.
 - `storage.py` - recursive bucket listing + signed URL download (service role key).
 - `pipeline.py` - NDJSON CLI: `echo '{...}' | python ml\pipeline.py`.
+- `service.py` - internal FastAPI endpoints for the ranking pipeline and CSV / Excel sheet parsing (`POST /parse-sheet`). Vercel's Node.js app delegates sheet parsing here instead of requiring Python in its runtime.
 
 ## Contract
 

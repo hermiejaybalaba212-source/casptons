@@ -152,98 +152,127 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "File must be 20 MB or smaller." }, { status: 400 });
   }
 
-  let pythonBin: string;
-  try {
-    pythonBin = resolvePython();
-  } catch (err: unknown) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : "Python unavailable." }, { status: 500 });
-  }
-
-  const workDir = mkdtempSync(path.join(tmpdir(), "sheet-"));
-  // Keep the original extension: read_sheet.py dispatches on it.
-  const savedPath = path.join(workDir, `upload${suffix}`);
-
-  try {
-    writeFileSync(savedPath, Buffer.from(await file.arrayBuffer()));
-
-    const projectRoot = path.resolve(process.cwd(), "..");
-    const reader = path.join(projectRoot, "backend", "ml", "read_sheet.py");
-    const result = spawnSync(/* turbopackIgnore: true */ pythonBin, [reader, savedPath], {
-      windowsHide: true,
-      timeout: 45000,
-      maxBuffer: 64 * 1024 * 1024,
-      encoding: "utf-8",
-      cwd: projectRoot,
-    });
-
-    const stdout = (result.stdout || "").trim();
-    if (!stdout) {
-      const detail = (result.stderr || "").trim().split("\n").slice(-4).join(" ");
+  let payload: Record<string, unknown>;
+  const fileBytes = Buffer.from(await file.arrayBuffer());
+  if (process.env.ML_URL) {
+    let response: Response;
+    try {
+      response = await fetch(`${process.env.ML_URL.replace(/\/+$/, "")}/parse-sheet`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "X-File-Name": encodeURIComponent(file.name),
+        },
+        body: fileBytes,
+        signal: AbortSignal.timeout(50_000),
+      });
+    } catch (err: unknown) {
       return NextResponse.json(
-        { error: detail || `Reader exited with code ${result.status ?? "unknown"}.` },
-        { status: 500 },
+        { error: `Could not reach the ML sheet reader: ${err instanceof Error ? err.message : "request failed"}` },
+        { status: 502 },
       );
     }
 
-    let payload: Record<string, unknown>;
+    let parsed: Record<string, unknown>;
     try {
-      payload = JSON.parse(stdout) as Record<string, unknown>;
+      parsed = await response.json() as Record<string, unknown>;
     } catch {
-      return NextResponse.json({ error: "Reader returned unreadable output." }, { status: 500 });
+      return NextResponse.json({ error: "The ML sheet reader returned an invalid response." }, { status: 502 });
     }
-
-    if (payload.ok !== true) {
-      return NextResponse.json({ error: String(payload.error || "Could not read this file.") }, { status: 400 });
+    if (!response.ok || parsed.ok !== true) {
+      const error = String(parsed.detail || parsed.error || "Could not read this file.");
+      const status = response.status >= 400 && response.status < 500 ? response.status : 502;
+      return NextResponse.json({ error }, { status });
     }
-
-    const importId = randomUUID();
-    const sheet = {
-      ...payload,
-      import_id: importId,
-      file_name: file.name,
-      file_size: file.size,
-    } as Record<string, unknown>;
-
-    // Keep the upload so it survives a refresh: the raw file plus a JSON
-    // sidecar of the parsed sheet (restored by GET, removed by DELETE).
-    let saveWarning: string | undefined;
+    payload = parsed;
+  } else {
+    if (process.env.VERCEL === "1" || process.env.VERCEL_ENV) {
+      return NextResponse.json({ error: "The Vercel ML_URL service binding is not configured." }, { status: 503 });
+    }
+    let pythonBin: string;
     try {
-      const bucket = serviceBucket();
-      if (!bucket) throw new Error("Server is missing SUPABASE_SERVICE_ROLE_KEY.");
-      const { raw, sidecar } = objectsFor(scope, file.name, importId);
-      const bytes = Buffer.from(await file.arrayBuffer());
-      const { error: rawError } = await bucket.upload(raw, bytes, {
-        contentType: file.type || "application/octet-stream",
-        upsert: false,
-      });
-      if (rawError) throw new Error(rawError.message);
-      const { error: sidecarError } = await bucket.upload(sidecar, JSON.stringify(sheet), {
-        contentType: "application/json",
-        upsert: false,
-      });
-      if (sidecarError) {
-        await bucket.remove([raw]);
-        throw new Error(sidecarError.message);
-      }
+      pythonBin = resolvePython();
     } catch (err: unknown) {
-      saveWarning = `Could not save this file for later (a refresh will lose it): ${
-        err instanceof Error ? err.message : "storage unavailable"
-      }`;
+      return NextResponse.json({ error: err instanceof Error ? err.message : "Python unavailable." }, { status: 500 });
     }
 
-    return NextResponse.json({ ...sheet, saved: !saveWarning, warning: saveWarning });
-  } catch (err: unknown) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Could not read this file." },
-      { status: 500 },
-    );
-  } finally {
+    const workDir = mkdtempSync(path.join(tmpdir(), "sheet-"));
+    // Keep the original extension: read_sheet.py dispatches on it.
+    const savedPath = path.join(workDir, `upload${suffix}`);
     try {
-      rmSync(workDir, { recursive: true, force: true });
-    } catch {
-      // temp cleanup is best-effort
+      writeFileSync(savedPath, fileBytes);
+      const projectRoot = path.resolve(process.cwd(), "..");
+      const reader = path.join(projectRoot, "backend", "ml", "read_sheet.py");
+      const result = spawnSync(/* turbopackIgnore: true */ pythonBin, [reader, savedPath], {
+        windowsHide: true,
+        timeout: 45000,
+        maxBuffer: 64 * 1024 * 1024,
+        encoding: "utf-8",
+        cwd: projectRoot,
+      });
+
+      const stdout = (result.stdout || "").trim();
+      if (!stdout) {
+        const detail = (result.stderr || "").trim().split("\n").slice(-4).join(" ");
+        return NextResponse.json(
+          { error: detail || `Reader exited with code ${result.status ?? "unknown"}.` },
+          { status: 500 },
+        );
+      }
+
+      try {
+        payload = JSON.parse(stdout) as Record<string, unknown>;
+      } catch {
+        return NextResponse.json({ error: "Reader returned unreadable output." }, { status: 500 });
+      }
+    } finally {
+      try {
+        rmSync(workDir, { recursive: true, force: true });
+      } catch {
+        // temp cleanup is best-effort
+      }
     }
   }
+
+  if (payload.ok !== true) {
+    return NextResponse.json({ error: String(payload.error || "Could not read this file.") }, { status: 400 });
+  }
+
+  const importId = randomUUID();
+  const sheet = {
+    ...payload,
+    import_id: importId,
+    file_name: file.name,
+    file_size: file.size,
+  } as Record<string, unknown>;
+
+  // Keep the upload so it survives a refresh: the raw file plus a JSON
+  // sidecar of the parsed sheet (restored by GET, removed by DELETE).
+  let saveWarning: string | undefined;
+  try {
+    const bucket = serviceBucket();
+    if (!bucket) throw new Error("Server is missing SUPABASE_SERVICE_ROLE_KEY.");
+    const { raw, sidecar } = objectsFor(scope, file.name, importId);
+    const { error: rawError } = await bucket.upload(raw, fileBytes, {
+      contentType: file.type || "application/octet-stream",
+      upsert: false,
+    });
+    if (rawError) throw new Error(rawError.message);
+    const { error: sidecarError } = await bucket.upload(sidecar, JSON.stringify(sheet), {
+      contentType: "application/json",
+      upsert: false,
+    });
+    if (sidecarError) {
+      await bucket.remove([raw]);
+      throw new Error(sidecarError.message);
+    }
+  } catch (err: unknown) {
+    saveWarning = `Could not save this file for later (a refresh will lose it): ${
+      err instanceof Error ? err.message : "storage unavailable"
+    }`;
+  }
+
+  return NextResponse.json({ ...sheet, saved: !saveWarning, warning: saveWarning });
 }
 
 interface RawEntry {
