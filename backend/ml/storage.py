@@ -92,6 +92,29 @@ def download(bucket: str, path: str) -> bytes:
         raise StorageError(f"download failed for '{path}': HTTP {exc.code}") from exc
 
 
+def upload(bucket: str, path: str, data: bytes, content_type: str = "application/octet-stream") -> None:
+    """Replace a private object using the service-role storage API."""
+    url, key = _config.supabase_config()
+    if not url or not key:
+        raise StorageError("Supabase URL / service role key missing from .env.local")
+
+    request = urllib.request.Request(
+        f"{url}/storage/v1/object/{urllib.parse.quote(bucket, safe='')}/{urllib.parse.quote(path, safe='/')}",
+        data=data,
+        headers={
+            **_headers(key),
+            "Content-Type": content_type,
+            "x-upsert": "true",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=120):
+            return
+    except urllib.error.HTTPError as exc:
+        raise StorageError(f"upload failed for '{path}': HTTP {exc.code}") from exc
+
+
 def owner_hint(path: Optional[str]) -> Optional[str]:
     """Storage folders are named after the owning student id."""
     if not path:

@@ -8,7 +8,13 @@ from typing import List, Optional
 
 ML_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = ML_DIR.parent
-MODEL_DIR = ML_DIR / "models"
+_runtime_model_dir = os.environ.get("ML_RUNTIME_MODEL_DIR")
+if _runtime_model_dir:
+    MODEL_DIR = Path(_runtime_model_dir)
+elif os.environ.get("VERCEL") or str(ML_DIR).startswith("/var/task"):
+    MODEL_DIR = Path("/tmp/ml-models")
+else:
+    MODEL_DIR = ML_DIR / "models"
 REPOSITORY_ROOT = PROJECT_ROOT.parent
 ENV_FILES = (
     PROJECT_ROOT / ".env.local",
@@ -119,6 +125,8 @@ NEUTRAL_NEED_SCORE = 50.0      # baseline when no income signal is used
 
 # --- storage --------------------------------------------------------------
 STORAGE_BUCKET = "itr-documents"
+MODEL_STORAGE_BUCKET = "training-data"
+MODEL_STORAGE_PATH = "models/scholarship_rf_model.joblib"
 
 # --- OCR limits -----------------------------------------------------------
 OCR_MAX_VARIANTS = 3           # preprocessing candidates tried before giving up

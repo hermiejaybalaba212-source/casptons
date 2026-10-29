@@ -306,6 +306,18 @@ def train(
     if income_ranked:
         deployed_path = _config.MODEL_DIR / "scholarship_rf_model.joblib"
         joblib.dump(payload, deployed_path, compress=3)
+        try:
+            from . import storage as _storage
+
+            _storage.upload(
+                _config.MODEL_STORAGE_BUCKET,
+                _config.MODEL_STORAGE_PATH,
+                deployed_path.read_bytes(),
+            )
+        except Exception as exc:
+            # The local artifact remains usable for this invocation; surface
+            # persistence failure in analytics instead of hiding it.
+            csv_warnings.append(f"Trained model could not be persisted to Storage: {exc}")
 
     return {
         "classifier": clf,
@@ -398,6 +410,21 @@ def load_external(path=None, required: bool = False) -> Optional[Dict]:
 
     if path is None:
         path = _config.external_model_path(required=required)
+    if path is None:
+        try:
+            from . import storage as _storage
+
+            _config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
+            cached = _config.MODEL_DIR / _config.MODEL_STORAGE_PATH
+            cached.write_bytes(
+                _storage.download(
+                    _config.MODEL_STORAGE_BUCKET,
+                    _config.MODEL_STORAGE_PATH,
+                )
+            )
+            path = cached
+        except Exception:
+            path = None
     if path is None:
         return None
     model_path = Path(path)
