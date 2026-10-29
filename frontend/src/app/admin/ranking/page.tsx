@@ -127,6 +127,48 @@ interface SavedRanking {
   generated_date: string;
 }
 
+function restoreSavedRankings(
+  rankings: SavedRanking[],
+  forms: ChedForm[],
+): RankedRow[] {
+  const formByApplication = new Map(forms.map((form) => [form.application_id, form]));
+
+  return rankings.map((ranking) => {
+    const form = formByApplication.get(ranking.application_id);
+    const application = Array.isArray(form?.scholarship_applications)
+      ? form.scholarship_applications[0]
+      : form?.scholarship_applications;
+    const student = Array.isArray(application?.student_accounts)
+      ? application.student_accounts[0]
+      : application?.student_accounts;
+    const scholarship = Array.isArray(application?.scholarship_programs)
+      ? application.scholarship_programs[0]
+      : application?.scholarship_programs;
+    return {
+      application_id: ranking.application_id,
+      student_name: student
+        ? `${student.last_name ?? ""}, ${student.given_name ?? ""}`.trim()
+        : `Application #${ranking.application_id}`,
+      student_number: student?.student_number ?? null,
+      scholarship: scholarship?.scholarship_name ?? null,
+      program: student?.program_name ?? form?.complete_program_name ?? null,
+      priority_score: Number(ranking.priority_score) || 0,
+      prediction: ranking.prediction_result || "Unclassified",
+      declared_income: null,
+      annual_income_family: null,
+      ocr_income: null,
+      income_used: null,
+      ocr_match_pct: null,
+      ocr_status: "OCR details not saved",
+      financial_need_score: null,
+      itr_path: form?.income_tax_return ?? null,
+      year_level: student?.year_level ?? form?.year_level ?? null,
+      sex: student?.sex ?? form?.sex ?? null,
+      savedResultOnly: true,
+    };
+  });
+}
+
 interface MatchInfo {
   exact_match: boolean;
   align_pct: number;
@@ -253,16 +295,17 @@ interface RankedRow {
   income_source?: string | null;
   income_delta?: number | null;
   income_corrected?: boolean;
-  ocr_match_pct: number;
+  ocr_match_pct: number | null;
   ocr_exact_match?: boolean;
   ocr_status: string;
   itr_trust?: "verified" | "mismatch" | "no_itr";
   itr_verified?: boolean;
-  financial_need_score: number;
+  financial_need_score: number | null;
   priority_target?: number;
   itr_path: string | null;
   year_level: string | null;
   sex: string | null;
+  savedResultOnly?: boolean;
 }
 
 interface LogLine {
@@ -453,8 +496,13 @@ export default function MLRankingPage() {
           .order("ranking_position", { ascending: true }),
       ]);
 
-      if (!chedQ.error) setChedForms((chedQ.data || []) as ChedForm[]);
-      if (!rankQ.error) setSavedRankings((rankQ.data || []) as SavedRanking[]);
+      const loadedForms = (chedQ.data || []) as ChedForm[];
+      const loadedRankings = (rankQ.data || []) as SavedRanking[];
+      if (!chedQ.error) setChedForms(loadedForms);
+      if (!rankQ.error) {
+        setSavedRankings(loadedRankings);
+        setRanked(restoreSavedRankings(loadedRankings, loadedForms));
+      }
       setPendingCount(pendingQ.data?.length ?? 0);
       if (!savedQ.error) setSavedCount(savedQ.count ?? 0);
       if (!progQ.error) setPrograms((progQ.data || []) as { scholarship_id: number; scholarship_name: string; status?: string }[]);
@@ -871,24 +919,40 @@ export default function MLRankingPage() {
         throw new Error("The OCR/ML pipeline closed before it finished. Check the Python environment.");
       }
 
-      if (runMode === "rank" && finalRows.length) {
+      if (runMode === "rank" && doneOk && !localError && finalRows.length) {
         setPhase("saving");
         const sb = getSupabase();
-        const rows = finalRows.map((row, i) => ({
+        const rows = finalRows
+          .filter((row): row is RankedRow & { application_id: number } => row.application_id != null)
+          .map((row, i) => ({
           application_id: row.application_id,
           priority_score: row.priority_score,
           ranking_position: i + 1,
           prediction_result: row.prediction,
           generated_date: new Date().toISOString(),
-        }));
-        for (const row of rows) {
-          await sb.from("ranking_result").delete().eq("application_id", row.application_id);
+          }));
+        const { error: deleteErr } = await sb
+          .from("ranking_result")
+          .delete()
+          .in("application_id", rows.map((row) => row.application_id));
+        if (deleteErr) {
+          localError = `Ranking computed but existing results could not be replaced: ${deleteErr.message}`;
         }
-        const { error: saveErr } = await sb.from("ranking_result").insert(rows);
-        if (saveErr && !localError) localError = `Ranking computed but saving to ranking_result failed: ${saveErr.message}`;
-        if (!saveErr) {
-          const { count } = await sb.from("ranking_result").select("ranking_id", { count: "exact", head: true });
-          setSavedCount(count ?? 0);
+        if (!localError) {
+          const { error: saveErr } = await sb.from("ranking_result").insert(rows);
+          if (saveErr) localError = `Ranking computed but saving to ranking_result failed: ${saveErr.message}`;
+        }
+        if (!localError) {
+          const [countQ, savedQ] = await Promise.all([
+            sb.from("ranking_result").select("ranking_id", { count: "exact", head: true }),
+            sb.from("ranking_result")
+              .select("application_id, ranking_position, priority_score, prediction_result, generated_date")
+              .order("ranking_position", { ascending: true }),
+          ]);
+          if (countQ.error) localError = `Ranking saved, but its saved-result count could not be refreshed: ${countQ.error.message}`;
+          if (savedQ.error) localError = `Ranking saved, but saved results could not be reloaded: ${savedQ.error.message}`;
+          if (!countQ.error) setSavedCount(countQ.count ?? 0);
+          if (!savedQ.error) setSavedRankings((savedQ.data || []) as SavedRanking[]);
         }
       }
 
@@ -925,7 +989,7 @@ export default function MLRankingPage() {
         logs: logLinesRef.current.slice(),
         trainInfo: finalTrainInfo,
         rankedCount: finalRows.length,
-        error: "",
+        error: localError,
       });
       setBusy(null);
     }
@@ -950,6 +1014,7 @@ export default function MLRankingPage() {
         if (delErr) throw new Error(delErr.message);
       }
       setSavedCount(0);
+      setSavedRankings([]);
       setRanked([]);
       setMessage(`Deleted the saved AI ranking (${rows?.length ?? 0} row(s)) from the database.`);
       toast.success("Saved ranking deleted.");
@@ -1716,7 +1781,9 @@ export default function MLRankingPage() {
                 <span className="font-semibold text-[#7B1113]">Rank 1 = lowest annual family income used</span>
                 {" \u00b7 "}
                 <span className="text-[#6B5458]">
-                  reliable OCR income corrects typed income; match status remains visible for review
+                  {ranked.some((row) => row.savedResultOnly)
+                    ? "saved ranking values restored from the database"
+                    : "reliable OCR income corrects typed income; match status remains visible for review"}
                 </span>
               </p>
             </div>
@@ -1742,6 +1809,17 @@ export default function MLRankingPage() {
               </button>
             </div>
           </div>
+
+          {!lastRun && savedRankings.length > 0 && (
+            <div className="border-b border-[#241012]/[0.07] bg-amber-50 px-5 py-2.5 text-[11px] leading-5 text-amber-900">
+              Showing <b>{savedRankings.length}</b> ranking result(s) restored from the database
+              {savedRankings[0]?.generated_date
+                ? ` \u00b7 last saved ${new Date(savedRankings[0].generated_date).toLocaleString("en-PH")}`
+                : ""}
+              . Rank, priority score, prediction, and applicant details persist. OCR corrections, full execution logs,
+              and training analytics are not stored in the current ranking table.
+            </div>
+          )}
 
           {/* The execution log as proof of which model scored these rows -
               the "Using the externally trained model" line names the file. */}
@@ -1823,9 +1901,15 @@ export default function MLRankingPage() {
             </span>
             <span>
               OCR corrected income{" "}
-              <b className="text-[#7B1113]">{ranked.filter((r) => r.income_corrected).length}</b>
+              <b className="text-[#7B1113]">
+                {ranked.some((row) => row.savedResultOnly) ? "\u2014" : ranked.filter((r) => r.income_corrected).length}
+              </b>
             </span>
-            <span className="ml-auto">Click any row to see the OCR breakdown and model inputs.</span>
+            <span className="ml-auto">
+              {ranked.some((row) => row.savedResultOnly)
+                ? "Saved OCR breakdown and model inputs are not available after refresh."
+                : "Click any row to see the OCR breakdown and model inputs."}
+            </span>
           </div>
         </div>
       )}
@@ -2081,16 +2165,20 @@ function RankRow({
       : row.prediction === "Moderate Need"
         ? "bg-[#FEF3C7] text-[#92400E] ring-1 ring-[#D97706]/30"
         : "bg-[#D1FAE5] text-[#065F46] ring-1 ring-[#059669]/30";
-  const trust: "verified" | "mismatch" | "no_itr" =
-    row.itr_trust ?? (row.itr_path ? "mismatch" : "no_itr");
+  const trust: "verified" | "mismatch" | "no_itr" | "not_saved" =
+    row.savedResultOnly ? "not_saved" : row.itr_trust ?? (row.itr_path ? "mismatch" : "no_itr");
   const matchChip =
-    trust === "verified"
+    trust === "not_saved"
+      ? { cls: "bg-gray-100 text-gray-600 ring-gray-300/50", dot: "bg-gray-400", text: "Details not saved", title: "The ranking row persisted, but OCR details are not part of the current ranking_result table" }
+      : trust === "verified"
       ? { cls: "bg-[#D1FAE5] text-[#065F46] ring-[#059669]/30", dot: "bg-emerald-500", text: `${pct(row.ocr_match_pct, 1)} \u2713`, title: "Typed income matches the scanned ITR; ranking is by annual income used" }
       : trust === "mismatch"
         ? { cls: "bg-[#FEF3C7] text-[#92400E] ring-[#D97706]/30", dot: "bg-amber-500", text: `${pct(row.ocr_match_pct, 1)} \u2717`, title: "Typed income differs from the ITR; a reliable OCR read corrects the income used for ranking" }
         : { cls: "bg-gray-100 text-gray-600 ring-gray-300/50", dot: "bg-gray-400", text: "No ITR", title: "No ITR uploaded; declared annual income is used when available" };
   const trustNote =
-    trust === "verified"
+    trust === "not_saved"
+      ? "OCR comparison was not stored with this ranking result"
+      : trust === "verified"
       ? `Typed income matches the ITR (${pct(row.ocr_match_pct, 1)})`
       : trust === "mismatch"
         ? `Typed income differs from the ITR (${pct(row.ocr_match_pct, 1)}); a reliable OCR figure is used`
@@ -2125,7 +2213,9 @@ function RankRow({
         <td className="whitespace-nowrap px-4 py-3">
           <div className="font-semibold text-[#7B1113]">{peso(row.income_used ?? row.declared_income ?? row.annual_income_family)}</div>
           <div className="text-[10px] text-[#8B7376]">
-            {row.income_source?.startsWith("ocr")
+            {row.savedResultOnly
+              ? "income details not saved"
+              : row.income_source?.startsWith("ocr")
               ? `from ITR \u00b7 typed ${peso(row.declared_income)}`
               : "typed by applicant"}
           </div>
@@ -2145,7 +2235,9 @@ function RankRow({
           </span>
         </td>
         <td className="px-4 py-3">
-          <ScoreMeter value={row.financial_need_score} tone="need" />
+          {row.financial_need_score == null
+            ? <span className="text-[#8B7376]">\u2014</span>
+            : <ScoreMeter value={row.financial_need_score} tone="need" />}
         </td>
         <td className="px-4 py-3">
           <ScoreMeter value={row.priority_score} tone="priority" />
@@ -2198,8 +2290,8 @@ function RankRow({
                   <span>Income ordering</span>
                   <b className="text-[#7B1113]">Lowest annual income first</b>
                 </p>
-                <p className="flex justify-between gap-2 py-0.5">Financial need score <b>{row.financial_need_score.toFixed(1)}</b></p>
-                <p className="flex justify-between gap-2 py-0.5">OCR match score <b>{row.ocr_match_pct.toFixed(2)}</b></p>
+                <p className="flex justify-between gap-2 py-0.5">Financial need score <b>{row.financial_need_score?.toFixed(1) ?? "\u2014"}</b></p>
+                <p className="flex justify-between gap-2 py-0.5">OCR match score <b>{row.ocr_match_pct?.toFixed(2) ?? "\u2014"}</b></p>
                 <p className="flex justify-between gap-2 py-0.5">Priority target <b>{row.priority_target?.toFixed(2) ?? "\u2014"}</b></p>
                 <p className="flex justify-between gap-2 py-0.5">Priority score (predicted) <b className="text-[#7B1113]">{row.priority_score.toFixed(2)}</b></p>
                 {row.probability != null && (
