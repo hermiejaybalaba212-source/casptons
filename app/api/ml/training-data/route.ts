@@ -122,6 +122,44 @@ export async function POST(req: Request) {
   const auth = await assertAdmin(req);
   if (auth !== true) return NextResponse.json({ error: auth }, { status: 401 });
 
+  // Large workbooks can exceed Vercel's request-body limit before a multipart
+  // request reaches this function. Prepare a signed Supabase upload instead.
+  if (new URL(req.url).searchParams.get("mode") === "prepare") {
+    let input: { name?: unknown; size?: unknown };
+    try {
+      input = (await req.json()) as { name?: unknown; size?: unknown };
+    } catch {
+      return NextResponse.json({ error: "Upload metadata must be valid JSON." }, { status: 400 });
+    }
+    const name = typeof input.name === "string" ? input.name : "";
+    const size = typeof input.size === "number" ? input.size : 0;
+    const lower = name.toLowerCase();
+    const isCsv = lower.endsWith(".csv");
+    const isXlsx = lower.endsWith(".xlsx");
+    if (!isCsv && !isXlsx) return NextResponse.json({ error: "Only .csv or .xlsx files are accepted." }, { status: 400 });
+    if (!Number.isFinite(size) || size <= 0 || size > MAX_BYTES) {
+      return NextResponse.json({ error: "File must be larger than 0 and 10 MB or smaller." }, { status: 400 });
+    }
+
+    let bucket;
+    try {
+      bucket = await serviceBucket();
+    } catch (error) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : "Could not access training-data storage." }, { status: 500 });
+    }
+    if (!bucket) return NextResponse.json({ error: "Server is missing SUPABASE_SERVICE_ROLE_KEY." }, { status: 500 });
+
+    await clearHistorical(bucket);
+    const objectPath = `historical/${objectNameFor(name)}`;
+    const sb = serviceClient();
+    if (!sb) return NextResponse.json({ error: "Server is missing SUPABASE_SERVICE_ROLE_KEY." }, { status: 500 });
+    const { data, error } = await sb.storage.from(BUCKET).createSignedUploadUrl(objectPath);
+    if (error || !data?.token) {
+      return NextResponse.json({ error: `Could not prepare training-data upload: ${error?.message || "No upload token returned."}` }, { status: 502 });
+    }
+    return NextResponse.json({ ok: true, path: objectPath, token: data.token, name, size });
+  }
+
   let form: FormData;
   try {
     form = await req.formData();

@@ -351,9 +351,25 @@ export default function MLRankingPage() {
     setHistBusy(true);
     setHistError("");
     try {
-      const body = new FormData();
-      body.append("file", file);
-      const res = await fetch("/api/ml/training-data", { method: "POST", body });
+      const prepare = await fetch("/api/ml/training-data?mode=prepare", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: file.name, size: file.size }),
+      });
+      const prepared = await prepare.json().catch(() => ({}));
+      if (!prepare.ok) throw new Error(prepared.error || `Upload preparation failed (${prepare.status})`);
+
+      const { error: uploadError } = await getSupabase()
+        .storage
+        .from("training-data")
+        .uploadToSignedUrl(prepared.path, prepared.token, file, {
+          contentType: file.type || (file.name.toLowerCase().endsWith(".csv")
+            ? "text/csv"
+            : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        });
+      if (uploadError) throw new Error(`Training-data upload failed in Supabase Storage: ${uploadError.message}`);
+
+      const res = new Response(JSON.stringify({ ok: true, name: file.name, size: file.size }), { status: 200 });
       const json = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(json.error || `Upload failed (${res.status})`);
       await refreshHistFile();
