@@ -2,23 +2,39 @@
 
 A full-stack scholarship management system for a college (SPC). Students apply to
 scholarship programs, submit supporting documents and CHED application forms, and are
-ranked by a Machine Learning (Random Forest) model written in TypeScript. CHED personnel
+ranked by a Machine Learning (Random Forest) model written in Python. CHED personnel
 and an Administrator review, approve, and notify applicants.
 
 ## Tech Stack
 
-- **Frontend:** Next.js (App Router), React, Tailwind CSS, TypeScript
+- **Frontend:** Next.js (App Router), React, Tailwind CSS, TypeScript, in `frontend/`
+- **Backend:** FastAPI and Python, in `backend/`
 - **Database & Auth:** Supabase (PostgreSQL + RLS) — main project + a separate registrar project
-- **ML Ranking:** Python — OCR (RapidOCR / onnxruntime-DirectML) + scikit-learn Random Forest, in `ml/`
+- **ML Ranking:** Python — OCR (RapidOCR / onnxruntime-DirectML) + scikit-learn Random Forest, in `backend/ml/`
 
-The ranking pipeline lives in `ml/pipeline.py`. It is exposed through the Next.js route
-`app/api/ml/ocr-rank/route.ts`, which either spawns the local Python interpreter
-(`PYTHON_BIN` → `python` → `py -3`) or, when `ML_URL` is set, calls the FastAPI service
-`ml/service.py` (see `vercel.json`), so **one deploy covers app + ML**.
+## Project structure
 
-> A second, pure-TypeScript Random Forest exists in `lib/ml/` and backs the
-> `/api/ml/train|predict|run|health|parse-csv` routes. It is a standalone/legacy path —
-> the Ranking page uses the Python pipeline, not these routes.
+```text
+frontend/                 # Next.js user interface
+├── src/app/              # Pages and temporary compatibility route adapters
+├── src/components/       # React components
+├── src/lib/              # Frontend utilities and shared TypeScript code
+└── public/               # Static assets
+
+backend/                  # Python server and backend processing
+├── app/main.py           # FastAPI entrypoint
+├── ml/                   # OCR, ranking, and spreadsheet processing
+└── requirements.txt      # Python dependencies
+
+tools/                    # Optional Colab and local training utilities
+├── colab/
+└── training/
+```
+
+The backend service is available at `http://localhost:8000` and currently exposes
+the ML pipeline at `POST /pipeline`. The Next.js app runs at `http://localhost:3000`.
+The existing `frontend/src/app/api/` files are compatibility adapters for the current
+UI and will call the FastAPI service as backend endpoints are migrated.
 
 ## Features
 
@@ -44,10 +60,14 @@ The ranking pipeline lives in `ml/pipeline.py`. It is exposed through the Next.j
 
 ## Getting Started (local)
 
-```bash
+```powershell
+cd frontend
 npm install
-py -3 -m pip install -r ml/requirements.txt   # OCR + Random Forest (ranking only)
 npm run dev        # app on http://localhost:3000
+
+cd ..\backend
+py -3 -m pip install -r requirements.txt
+py -3 -m uvicorn app.main:app --reload --port 8000
 ```
 
 Copy `.env.local.example` to `.env.local` and fill in the Supabase values

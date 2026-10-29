@@ -1,7 +1,7 @@
 {
   "services": {
     "app": {
-      "root": ".",
+      "root": "frontend",
       "framework": "nextjs",
       "bindings": [
         {
@@ -13,9 +13,9 @@
       ]
     },
     "ml": {
-      "root": "ml",
+      "root": "backend",
       "framework": "fastapi",
-      "entrypoint": "service:app",
+      "entrypoint": "app.main:app",
       "buildCommand": "(uv pip uninstall opencv-python || python -m pip uninstall -y opencv-python); (uv pip install --no-deps opencv-python-headless || python -m pip install --no-deps opencv-python-headless)",
       "functions": {
         "service.py": {

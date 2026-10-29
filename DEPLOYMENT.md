@@ -1,17 +1,18 @@
 # Deployment Guide
 
-This project deploys as **one Vercel project with two services** (see `vercel.json`):
+This project is separated into a Next.js frontend and a FastAPI backend. It deploys as
+**one Vercel project with two services** (see `vercel.json`):
 
 | Part | Tech | Where it runs |
 |------|------|---------------|
-| App + ML ranking API | Next.js + TypeScript | Vercel service `app` |
-| OCR + Random Forest pipeline | Python (FastAPI `ml/service.py`) | Vercel service `ml` |
+| Frontend | Next.js + TypeScript in `frontend/` | Vercel service `app` |
+| Backend | Python FastAPI in `backend/app/main.py` | Vercel service `ml` |
 | Database | PostgreSQL | Supabase (main + registrar projects) |
 
-`vercel.json` binds the `ml` service to the app as the `ML_URL` environment variable, so
-`app/api/ml/ocr-rank/route.ts` calls it instead of spawning a local Python process.
+`vercel.json` binds the `ml` service to the frontend as the `ML_URL` environment variable.
+The backend's ML pipeline is in `backend/ml/`.
 
-**Local development** needs Python installed: `py -3 -m pip install -r ml/requirements.txt`.
+**Local development** needs Python installed: `py -3 -m pip install -r backend/requirements.txt`.
 If `ML_URL` is unset the route falls back to spawning local Python
 (`PYTHON_BIN` → `python` → `py -3`), so no service binding is needed on your machine.
 
@@ -46,7 +47,7 @@ git push -u origin main
 2. Click **Add New → Project**.
 3. Select your `scholar-capstone` repo.
 4. Vercel auto-detects Next.js. **Framework: Next.js**.
-5. Under **Environment Variables**, add these values for **Production** (and
+5. Set the Vercel **Root Directory** to `frontend`, then under **Environment Variables**, add these values for **Production** (and
    **Preview** if you test preview deployments):
    - `NEXT_PUBLIC_SUPABASE_URL` = your Supabase project URL (`https://xxxx.supabase.co`)
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY` = your anon key
