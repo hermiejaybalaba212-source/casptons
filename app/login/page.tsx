@@ -150,11 +150,15 @@ export default function LoginPage() {
       const params = new URLSearchParams(window.location.search);
       const redirectPath = params.get("redirect");
       toast.success(`Signed in successfully — opening ${userData.role} dashboard.`);
+      // Confirm that Supabase has persisted the session before navigating.
+      // This avoids a mobile-browser race where the dashboard loads before
+      // the auth cookie is available to the route guard.
+      await sb.auth.getSession();
       if (redirectPath && redirectPath.startsWith(roleHome) && !redirectPath.startsWith("//") && !redirectPath.includes(":") && !redirectPath.includes("\\")) {
-        router.push(redirectPath);
+        window.location.assign(redirectPath);
         return;
       }
-      router.push(roleHome);
+      window.location.assign(roleHome);
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : String(err);
       setError(errorMessage === "Failed to fetch"
