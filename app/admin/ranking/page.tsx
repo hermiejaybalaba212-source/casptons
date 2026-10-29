@@ -23,6 +23,14 @@ interface Applicant {
   shs_gwa: number | null;
   college_gpa: number | null;
   hasItr: boolean;
+  // statutory priority data (same fields the historical preprocessing derives)
+  disability?: string | null;
+  indigenous_people_group?: string | null;
+  solo_parent?: number | null;
+  first_gen?: number | null;
+  is_4ps?: number | null;
+  birthdate?: string | null;
+  age?: number | null;
 }
 
 interface ChedForm {
@@ -202,6 +210,10 @@ interface TrainInfo {
   n_synthetic: number;
   n_csv?: number;
   dataset?: TrainDataset;
+  // Set when the run scored with a model trained earlier (the Execute Training
+  // Data panel's scholarship_rf_model.joblib) instead of refitting locally.
+  external?: boolean;
+  model_source?: string;
   n_trees: number;
   seed: number;
   accuracy: number;
@@ -219,15 +231,16 @@ interface TrainInfo {
 }
 
 interface RankedRow {
-  application_id: number;
-  student_name: string;
-  student_number: string;
-  scholarship: string;
+  application_id: number | null;
+  student_name: string | null;
+  student_number: string | null;
+  scholarship: string | null;
   program: string | null;
   priority_score: number;
   prediction: string;
   probability?: number;
   declared_income: number | null;
+  annual_income_family?: number | null;
   ocr_income: number | null;
   income_used: number | null;
   income_source?: string | null;
@@ -274,7 +287,7 @@ export default function MLRankingPage() {
   const [pendingByProgram, setPendingByProgram] = useState<Record<number, number>>({});
   const [selectedProgramId, setSelectedProgramId] = useState<number | null>(null);
 
-  const [busy, setBusy] = useState<null | "scan" | "rank">(null);
+  const [busy, setBusy] = useState<null | "scan" | "rank" | "train">(null);
   const [savedCount, setSavedCount] = useState(0);
   const [savedBusy, setSavedBusy] = useState(false);
   const [phase, setPhase] = useState<Phase>("scanning");
@@ -291,6 +304,20 @@ export default function MLRankingPage() {
   const [histBusy, setHistBusy] = useState(false);
   const [histError, setHistError] = useState("");
   const histInputRef = useRef<HTMLInputElement | null>(null);
+
+  // A finished run's log + result, kept after the progress modal closes so the
+  // admin can still review what the training / ranking actually did.
+  const [lastRun, setLastRun] = useState<{
+    mode: "scan" | "rank" | "train";
+    finishedAt: string;
+    logs: LogLine[];
+    trainInfo: TrainInfo | null;
+    rankedCount: number;
+    error: string;
+  } | null>(null);
+  const logLinesRef = useRef<LogLine[]>([]);
+  const [showTrainLog, setShowTrainLog] = useState(false);
+  const [showRankLog, setShowRankLog] = useState(false);
 
   const logRef = useRef<HTMLDivElement | null>(null);
 
@@ -331,10 +358,10 @@ export default function MLRankingPage() {
       if (!res.ok) throw new Error(json.error || `Upload failed (${res.status})`);
       await refreshHistFile();
       setMessage(
-        `Historical training file "${json.name}" saved. It will be blended into the next ranking run.`
+        `Machine learning train data "${json.name}" saved. It will be blended into the next ranking run.`
         + (json.warning ? ` ${json.warning}` : "")
       );
-      toast.success("Historical training data uploaded.");
+      toast.success("Machine learning train data uploaded.");
     } catch (err: unknown) {
       setHistError(err instanceof Error ? err.message : "Upload failed.");
     } finally {
@@ -353,7 +380,7 @@ export default function MLRankingPage() {
         throw new Error(json.error || `Remove failed (${res.status})`);
       }
       setHistFile(null);
-      setMessage("Historical training file removed — the next ranking run uses the bundled sample only.");
+      setMessage("Machine learning train data removed — the next ranking run uses the bundled sample only.");
     } catch (err: unknown) {
       setHistError(err instanceof Error ? err.message : "Remove failed.");
     } finally {
@@ -476,7 +503,7 @@ export default function MLRankingPage() {
     if (!selectedProgramId) throw new Error("Select a scholarship program before scanning or ranking.");
     const { data: pendingApps, error: appErr } = await sb
       .from("scholarship_applications")
-      .select("application_id, student_id, application_data, scholarship_id, scholarship_programs(scholarship_name), student_accounts(given_name, last_name, student_number, program_name, year_level, sex)")
+      .select("application_id, student_id, application_data, scholarship_id, scholarship_programs(scholarship_name), student_accounts(given_name, last_name, student_number, program_name, year_level, sex, birthdate)")
       .eq("application_status", "Pending")
       .eq("scholarship_id", selectedProgramId);
 
@@ -502,6 +529,16 @@ export default function MLRankingPage() {
       const income = form?.annual_income_family ?? applicationData.annual_income_family ?? null;
       const itrPath = form?.income_tax_return ?? applicationData.itr_file ?? null;
       const acad = acadByStudent.get(Number(app.student_id));
+      const birthdate = form?.birthdate ?? sa?.birthdate ?? null;
+      let age: number | null = null;
+      if (birthdate) {
+        const born = new Date(String(birthdate).slice(0, 10));
+        if (!Number.isNaN(born.getTime())) {
+          const now = new Date();
+          age = now.getFullYear() - born.getFullYear()
+            - ((now.getMonth(), now.getDate()) < (born.getMonth(), born.getDate()) ? 1 : 0);
+        }
+      }
       return {
         application_id: app.application_id,
         student_name: sa ? `${sa.last_name ?? ""}, ${sa.given_name ?? ""}` : `App #${app.application_id}`,
@@ -515,6 +552,15 @@ export default function MLRankingPage() {
         shs_gwa: form?.shs_gwa ?? acad?.shs_gwa ?? null,
         college_gpa: form?.college_gpa ?? acad?.college_gpa ?? null,
         hasItr: !!itrPath,
+        // statutory priority fields (CHED form has no solo-parent / 4Ps /
+        // first-gen column yet - they arrive as null and score 0)
+        disability: form?.disability ?? null,
+        indigenous_people_group: form?.indigenous_people_group ?? null,
+        solo_parent: null,
+        first_gen: null,
+        is_4ps: null,
+        birthdate,
+        age,
       } as Applicant;
     });
   }
@@ -523,15 +569,21 @@ export default function MLRankingPage() {
     setLogLines((prev) => {
       const next = prev.length > 400 ? prev.slice(-300) : prev.slice();
       next.push(line);
+      logLinesRef.current = next;
       return next;
     });
   }
 
-  async function runPipeline(mode: "scan" | "rank") {
+  async function runPipeline(mode: "scan" | "rank" | "train") {
     const startedAt = Date.now();
     let localError = "";
-    if (!selectedProgramId) {
+    const isTrain = mode === "train";
+    if (!isTrain && !selectedProgramId) {
       setError("Select a scholarship program first — only that program's student applications are scanned and ranked.");
+      return;
+    }
+    if (isTrain && !histFile) {
+      setError("Upload a CSV / Excel training file first — the train-only ranking trains on that file and ranks its own rows.");
       return;
     }
     const programName = programs.find((p) => p.scholarship_id === selectedProgramId)?.scholarship_name || `program #${selectedProgramId}`;
@@ -543,32 +595,49 @@ export default function MLRankingPage() {
     setProgress({ done: 0, total: 0 });
     setDocs([]);
     setLogLines([]);
-    pushLog({ msg: `Starting ${mode === "scan" ? "OCR scan" : "OCR + Random Forest ranking"} (python ml/pipeline.py)...` });
-    pushLog({ msg: `Selected scholarship program: ${programName} (${pendingByProgram[selectedProgramId] || 0} pending application(s)).` });
-    pushLog({ msg: "Loading pending applicants from Supabase..." });
+    if (isTrain) {
+      setOcrAnalytics(null);
+      pushLog({ msg: `Starting train-only run from the uploaded file "${histFile?.name}" (python ml/pipeline.py)...` });
+      pushLog({ msg: "No program selection needed: the file is both the training set and the ranked set (proof of dataset)." });
+      pushLog({ msg: "Colab-notebook setup: 200 trees, max_depth 3, min_samples_leaf 200, seed 42." });
+    } else {
+      pushLog({ msg: `Starting ${mode === "scan" ? "OCR scan" : "OCR + Random Forest ranking"} (python ml/pipeline.py)...` });
+      pushLog({ msg: `Selected scholarship program: ${programName} (${selectedProgramId ? pendingByProgram[selectedProgramId] || 0 : 0} pending application(s)).` });
+      pushLog({ msg: "Loading pending applicants from Supabase..." });
+    }
     if (mode === "scan") {
       setOcrAnalytics(null);
       setRanked([]);
       setTrainInfo(null);
     }
 
+    // Declared before the try so the finally block can read them - a finished
+    // run's log + metrics stay on screen after the progress modal closes.
+    let finalAnalytics: ScanAnalytics | null = null;
+    let finalRows: RankedRow[] = [];
+    let finalTrainInfo: TrainInfo | null = null;
+
     try {
-      const applicants = await buildApplicants();
-      if (!applicants.length) {
+      const applicants = isTrain ? [] : await buildApplicants();
+      if (!isTrain && !applicants.length) {
         setError(`No pending application is waiting under "${programName}". Choose another program or wait for students to apply.`);
         setBusy(null);
         return;
       }
       const eligible = applicants.filter((a) => a.hasItr && a.annual_income_family != null);
       if (mode === "rank" && !eligible.length) {
-        setError(
-          "No pending applicant has an uploaded ITR with income data. Students must upload an ITR before they can be ranked.",
-        );
-        setBusy(null);
-        return;
+        // Training must never be blocked by missing ITR / income: the Random
+        // Forest still fits on the synthetic + historical rows, and every
+        // applicant without income trains with the neutral need score (50).
+        pushLog({
+          msg:
+            "No pending applicant has an uploaded ITR with income data - continuing anyway. "
+            + "Applicants without ITR / income train with a neutral need score (50) and rank "
+            + "after the verified group; the historical + synthetic rows still drive the model.",
+        });
       }
 
-      const queued = applicants.filter((a) => a.itr_path);
+      const queued = isTrain ? [] : applicants.filter((a) => a.itr_path);
       setProgress({ done: 0, total: queued.length });
       if (queued.length) {
         setDocs(
@@ -586,15 +655,28 @@ export default function MLRankingPage() {
         queued.forEach((a, i) =>
           pushLog({ msg: `  [${i + 1}/${queued.length}] ${a.itr_path} - ${a.student_name} (typed ${peso(a.annual_income_family)})` }),
         );
-      } else {
+      } else if (!isTrain) {
         pushLog({ msg: "No ITR file is linked to a pending applicant yet - scanning the storage bucket only." });
       }
-      pushLog({ msg: "Handing the documents to the OCR engine (rapidocr + onnxruntime DML)..." });
+      if (!isTrain) pushLog({ msg: "Handing the documents to the OCR engine (rapidocr + onnxruntime DML)..." });
 
       const res = await fetch(PIPELINE_API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: JSON.stringify(
+          isTrain
+            ? {
+                // Train-only: the uploaded file supplies every row. Hyperparameters
+                // mirror the Colab notebook's proof-of-dataset run.
+                mode: "train",
+                seed: 42,
+                n_trees: 200,
+                n_synth: 0,
+                max_depth: 3,
+                min_samples_leaf: 200,
+                applicants: [],
+              }
+            : {
           mode,
           seed: 2026,
           n_trees: 100,
@@ -611,6 +693,13 @@ export default function MLRankingPage() {
             sex: a.sex,
             shs_gwa: a.shs_gwa,
             college_gpa: a.college_gpa,
+            disability: a.disability,
+            indigenous_people_group: a.indigenous_people_group,
+            solo_parent: a.solo_parent,
+            first_gen: a.first_gen,
+            is_4ps: a.is_4ps,
+            birthdate: a.birthdate,
+            age: a.age,
           })),
         }),
       });
@@ -625,8 +714,6 @@ export default function MLRankingPage() {
       let buffer = "";
       let sawDone = false;
       let doneOk = false;
-      let finalAnalytics: ScanAnalytics | null = null;
-      let finalRows: RankedRow[] = [];
 
       for (;;) {
         const { done, value } = await reader.read();
@@ -709,6 +796,7 @@ export default function MLRankingPage() {
           } else if (type === "train") {
             setPhase("training");
             setTrainInfo(event as unknown as TrainInfo);
+            finalTrainInfo = event as unknown as TrainInfo;
             pushLog({ t: event.t as number | undefined, msg: `Random Forest trained: accuracy ${fpct(Number(event.accuracy))}, F1 ${fpct(Number(event.f1))}, ROC-AUC ${event.roc_auc != null ? fpct(Number(event.roc_auc), 2) : "n/a"}.` });
           } else if (type === "rank") {
             setPhase("ranking");
@@ -770,7 +858,9 @@ export default function MLRankingPage() {
         setMessage(
           mode === "scan"
             ? `OCR scan finished in ${seconds}s \u2014 ${finalAnalytics?.income_detected ?? 0} of ${finalAnalytics?.documents_scanned ?? 0} ITR image(s) produced an income value.`
-            : `Ranking complete in ${seconds}s \u2014 ${finalRows.length} applicant(s) prioritized. Rank 1 = most in need of financial assistance.`,
+            : isTrain
+              ? `Train-only run finished in ${seconds}s \u2014 the Random Forest fit on the uploaded file and ranked its ${finalRows.length} row(s). Rank 1 = lowest annual family income.`
+              : `Ranking complete in ${seconds}s \u2014 ${finalRows.length} applicant(s) prioritized. Rank 1 = most in need of financial assistance.`,
         );
 
       }
@@ -778,6 +868,16 @@ export default function MLRankingPage() {
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to run the OCR / ranking pipeline.");
     } finally {
+      // Keep a finished run's log + metrics on screen after the progress modal
+      // closes, so the admin has proof of what the training / ranking did.
+      setLastRun({
+        mode,
+        finishedAt: new Date().toLocaleTimeString("en-PH"),
+        logs: logLinesRef.current.slice(),
+        trainInfo: finalTrainInfo,
+        rankedCount: finalRows.length,
+        error: "",
+      });
       setBusy(null);
     }
   }
@@ -849,7 +949,7 @@ export default function MLRankingPage() {
 
     // In-session preprocessing sources (latest OCR scan / ranking run), keyed by application.
     const rankedByApp = new Map<number, RankedRow>();
-    ranked.forEach((r) => rankedByApp.set(r.application_id, r));
+    ranked.forEach((r) => { if (r.application_id != null) rankedByApp.set(r.application_id, r); });
     const ocrByApp = new Map<number, DocUi>();
     docs.forEach((d) => { if (d.application_id != null) ocrByApp.set(d.application_id, d); });
 
@@ -1151,19 +1251,39 @@ export default function MLRankingPage() {
       <div className="overflow-hidden rounded-2xl border border-[#241012]/[0.07] bg-white shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#241012]/[0.07] bg-gradient-to-r from-[#FAF7F5] to-white px-5 py-4">
           <div>
-            <p className="text-sm font-bold text-[#241012]">Historical training data</p>
+            <p className="text-sm font-bold text-[#241012]">Machine learning train data</p>
             <p className="mt-0.5 text-[11px] text-[#6B5458]">
-              Optional: blend the school&rsquo;s past scholarship applications (CSV / Excel) into the training set.
-              Best columns <code className="rounded bg-[#241012]/[0.05] px-1">annual_income</code> and{" "}
-              <code className="rounded bg-[#241012]/[0.05] px-1">has_itr</code>.
+              Upload the PSA FIES workbook (or the school&rsquo;s past applications) and click{" "}
+              <b className="text-[#7B1113]">Execute Training Data</b> &mdash; it trains on{" "}
+              <b className="text-[#241012]">your file only</b>, exactly like the Google Colab notebook, then
+              deploys that model for the main <b className="text-[#241012]">Execute AI Ranking</b> (OCR + ITR / annual income).
+              <b className="text-[#241012]"> No program selection needed.</b>
+              <br />
+              Reads <code className="rounded bg-[#241012]/[0.05] px-1">TOINC</code> (annual family income) &rarr; 5 features,
+              target <code className="rounded bg-[#241012]/[0.05] px-1">NPCINC &le; 4</code>; falls back to{" "}
+              <code className="rounded bg-[#241012]/[0.05] px-1">annual_income</code> on plain CSV files.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => runPipeline("train")}
+              disabled={!!busy || !histFile}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-[#7B1113] to-[#540111] px-4 py-2.5 text-xs font-bold text-white shadow-md transition hover:brightness-110 active:scale-[0.99] disabled:opacity-50"
+              title={
+                histFile
+                  ? "Trains the Random Forest directly on your uploaded file, then deploys that model for the main Execute AI Ranking (OCR + ITR / annual income) - no program selection needed"
+                  : "Upload a CSV / Excel file first - it becomes the training set for the deployed model."
+              }
+            >
+              <span aria-hidden>&#9654;</span>
+              {busy === "train" ? "Training data..." : "Execute Training Data"}
+            </button>
             <input
               ref={histInputRef}
               type="file"
               accept=".csv,.xlsx"
-              className="hidden"
+              aria-label="Upload training CSV or Excel file"
+              className="sr-only"
               onChange={(e) => {
                 const f = e.target.files?.[0];
                 if (f) uploadHistFile(f);
@@ -1194,7 +1314,10 @@ export default function MLRankingPage() {
             <span>
               Using <b className="text-[#241012]">{histFile.name}</b> ({Math.max(1, Math.round(histFile.size / 1024))} KB)
               {histFile.updated_at ? ` \u00b7 updated ${new Date(histFile.updated_at).toLocaleDateString("en-PH")}` : ""}
-              {" \u00b7 "}blended into every training run.
+              {" \u00b7 "}blended into every training run{" "}
+              <span className="text-[#7B1113]">
+                &mdash; watch the scan log for &quot;Loaded N historical training row(s)&quot; to confirm this file was read.
+              </span>
             </span>
           ) : (
             <span>
@@ -1312,6 +1435,96 @@ export default function MLRankingPage() {
         </div>
       )}
 
+      {/* Training-data result: persists after the progress modal closes, so the
+          admin keeps proof of what Execute Training Data produced - the model
+          file, its holdout metrics, the full log, and a download button. */}
+      {lastRun?.mode === "train" && (
+        <div className="overflow-hidden rounded-2xl border border-[#7B1113]/20 bg-white shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#7B1113]/15 bg-gradient-to-r from-[#7B1113]/[0.06] to-white px-5 py-4">
+            <div>
+              <p className="text-sm font-bold text-[#241012]">
+                Training data result
+                <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                  model ready
+                </span>
+              </p>
+              <p className="mt-0.5 text-[11px] text-[#6B5458]">
+                Fitted on <b className="text-[#241012]">{histFile?.name || "the uploaded file"}</b>
+                {lastRun.trainInfo ? ` \u00b7 ${lastRun.trainInfo.n_samples.toLocaleString()} rows \u00b7 ${lastRun.trainInfo.n_trees} trees` : ""}
+                {" \u00b7 "}finished {lastRun.finishedAt}
+                {" \u00b7 "}
+                <span className="font-semibold text-[#7B1113]">
+                  this model is used automatically by Execute AI Ranking
+                </span>
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <a
+                href="/api/ml/model"
+                download="scholarship_rf_model.joblib"
+                className="rounded-lg bg-[#7B1113] px-3.5 py-2 text-[11px] font-bold text-white hover:bg-[#540111]"
+                title="Download the trained model (scholarship_rf_model.joblib)"
+              >
+                Download model
+              </a>
+              <button
+                onClick={() => setShowTrainLog((v) => !v)}
+                className="rounded-lg border border-[#7B1113]/30 px-3.5 py-2 text-[11px] font-bold text-[#7B1113] hover:bg-[#7B1113]/5"
+              >
+                {showTrainLog ? "Hide logs" : "View logs"}
+              </button>
+            </div>
+          </div>
+
+          {/* Holdout metrics straight from the fit (accuracy / F1 / ROC-AUC). */}
+          {lastRun.trainInfo && (
+            <div className="grid grid-cols-2 gap-px border-b border-[#241012]/[0.07] bg-[#241012]/[0.07] sm:grid-cols-4">
+              {[
+                { label: "Accuracy", value: pct(lastRun.trainInfo.accuracy, 2) },
+                { label: "F1", value: pct(lastRun.trainInfo.f1, 2) },
+                { label: "ROC-AUC", value: lastRun.trainInfo.roc_auc != null ? pct(lastRun.trainInfo.roc_auc, 2) : "n/a" },
+                { label: "Model file", value: "scholarship_rf_model.joblib" },
+              ].map((m) => (
+                <div key={m.label} className="bg-white px-5 py-3">
+                  <p className="text-[10px] font-extrabold uppercase tracking-wide text-[#6B5458]">{m.label}</p>
+                  <p className="mt-0.5 truncate text-sm font-bold text-[#241012]" title={m.value}>{m.value}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {lastRun.trainInfo && Object.keys(lastRun.trainInfo.feature_importance || {}).length > 0 && (
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[#241012]/[0.07] px-5 py-2.5 text-[11px] text-[#6B5458]">
+              <span className="text-[10px] font-extrabold uppercase tracking-wide text-[#7B1113]">Features used</span>
+              {Object.entries(lastRun.trainInfo.feature_importance)
+                .sort((a, b) => b[1] - a[1])
+                .map(([name, value]) => (
+                  <span key={name}>
+                    {name.replace(/_/g, " ")} <b className="text-[#241012]">{(value * 100).toFixed(1)}%</b>
+                  </span>
+                ))}
+            </div>
+          )}
+
+          {/* The full execution log, kept on screen as proof of the training run. */}
+          {showTrainLog && (
+            <div className="px-5 py-4">
+              <p className="text-[10px] font-bold uppercase tracking-wide text-[#6B5458]">Execution log</p>
+              <div className="mt-1.5 max-h-72 overflow-y-auto rounded-xl bg-[#241012] p-3 font-mono text-[10px] leading-relaxed text-[#F3E9EA]">
+                {lastRun.logs.length === 0 && <p className="text-[#8B7376]">No log lines were captured.</p>}
+                {lastRun.logs.map((line, i) => (
+                  <p key={i} className={line.stderr ? "text-[#FF9A9A]" : undefined}>
+                    {line.t != null ? <span className="text-[#8B7376]">[{line.t.toFixed(1)}s] </span> : null}
+                    {line.msg}
+                  </p>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {ranked.length === 0 ? (
         <EmptyState
           icon="&#129302;"
@@ -1322,7 +1535,24 @@ export default function MLRankingPage() {
         <div className="overflow-hidden rounded-2xl border border-[#241012]/[0.07] bg-white shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#241012]/[0.07] bg-gradient-to-r from-[#FAF7F5] to-white px-5 py-4">
             <div>
-              <p className="text-sm font-bold text-[#241012]">AI Ranking Results</p>
+              <p className="text-sm font-bold text-[#241012]">
+                AI Ranking Results
+                {(() => {
+                  // Proof of which model scored these applicants: the trained
+                  // model from Execute Training Data, or a fresh local fit.
+                  const ti = lastRun?.mode === "rank" ? lastRun.trainInfo : trainInfo;
+                  const usedTrained = Boolean(ti?.external) || String(ti?.model_source || "") === "external";
+                  return usedTrained ? (
+                    <span
+                      className="ml-2 inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700"
+                      title={ti?.model_path || "Trained model from Execute Training Data"}
+                    >
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                      trained model used
+                    </span>
+                  ) : null;
+                })()}
+              </p>
               <p className="mt-0.5 text-[11px] text-[#6B5458]">
                 {(() => {
                   const pname = programs.find((p) => p.scholarship_id === selectedProgramId)?.scholarship_name;
@@ -1338,6 +1568,13 @@ export default function MLRankingPage() {
             </div>
             <div className="flex flex-wrap gap-2">
               <button
+                onClick={() => setShowRankLog((v) => !v)}
+                className="rounded-lg border border-[#7B1113]/30 px-3.5 py-2 text-[11px] font-bold text-[#7B1113] hover:bg-[#7B1113]/5"
+                title="Show the execution log - the 'Using the externally trained model' line proves which model ranked these applicants"
+              >
+                {showRankLog ? "Hide logs" : "View logs"}
+              </button>
+              <button
                 onClick={exportRankedCsv}
                 className="rounded-lg bg-[#7B1113] px-3.5 py-2 text-[11px] font-bold text-white hover:bg-[#540111]"
               >
@@ -1351,6 +1588,31 @@ export default function MLRankingPage() {
               </button>
             </div>
           </div>
+
+          {/* The execution log as proof of which model scored these rows -
+              the "Using the externally trained model" line names the file. */}
+          {showRankLog && (
+            <div className="border-b border-[#241012]/[0.07] px-5 py-4">
+              <p className="text-[10px] font-bold uppercase tracking-wide text-[#6B5458]">Execution log</p>
+              <div className="mt-1.5 max-h-72 overflow-y-auto rounded-xl bg-[#241012] p-3 font-mono text-[10px] leading-relaxed text-[#F3E9EA]">
+                {(lastRun?.mode === "rank" ? lastRun.logs : []).length === 0 && (
+                  <p className="text-[#8B7376]">
+                    Run Execute AI Ranking to capture this run&rsquo;s log. The line
+                    &ldquo;Using the externally trained model&rdquo; names the model file that ranked these applicants.
+                  </p>
+                )}
+                {(lastRun?.mode === "rank" ? lastRun.logs : []).map((line, i) => {
+                  const proof = line.msg.indexOf("externally trained model") >= 0;
+                  return (
+                    <p key={i} className={line.stderr ? "text-[#FF9A9A]" : proof ? "text-[#8FE3B0] font-bold" : undefined}>
+                      {line.t != null ? <span className="text-[#8B7376]">[{line.t.toFixed(1)}s] </span> : null}
+                      {line.msg}
+                    </p>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* The table is wider than the card: a clearly visible scrollbar plus a
               right-edge fade make it obvious there are more columns (Prediction,
@@ -1377,10 +1639,10 @@ export default function MLRankingPage() {
               <tbody>
                 {ranked.map((r, i) => (
                   <RankRow
-                    key={r.application_id}
+                    key={r.application_id ?? `file-row-${i}`}
                     row={r}
                     index={i}
-                    expanded={expanded === r.application_id}
+                    expanded={expanded === r.application_id && r.application_id != null}
                     onToggle={() => setExpanded(expanded === r.application_id ? null : r.application_id)}
                     onViewItr={viewItr}
                   />
@@ -1422,15 +1684,31 @@ export default function MLRankingPage() {
                 <span className="h-5 w-5 animate-spin rounded-full border-[3px] border-[#7B1113]/20 border-t-[#7B1113]" />
                 <div>
                   <p className="text-sm font-bold text-[#241012]">
-                    {busy === "scan" ? "AI OCR is running" : "AI OCR + Random Forest ranking is running"}
+                    {busy === "train"
+                      ? "Training the model on your uploaded file"
+                      : busy === "scan"
+                        ? "AI OCR is running"
+                        : "AI OCR + Random Forest ranking is running"}
                   </p>
-                  <p className="text-[11px] text-[#8B7376]">{phaseLabel[phase]} &middot; {elapsed}s elapsed</p>
+                  <p className="text-[11px] text-[#8B7376]">
+                    {busy === "train" ? "Fitting the Random Forest (no OCR, no ranking)" : phaseLabel[phase]} &middot; {elapsed}s elapsed
+                  </p>
                 </div>
               </div>
 
               <div className="mt-4 flex items-center">
-                {(["scanning", "training", "ranking", "saving"] as Phase[]).map((step, i, arr) => {
-                  const stepIndex = arr.indexOf(phase);
+                {(busy === "train"
+                  ? (["preparing", "training", "deploying"] as string[])
+                  : (["scanning", "training", "ranking", "saving"] as string[])
+                ).map((step, i, arr) => {
+                  const stepIndex =
+                    busy === "train"
+                      ? phase === "scanning"
+                        ? 0
+                        : phase === "training"
+                          ? 1
+                          : 2
+                      : arr.indexOf(phase);
                   const done = i < stepIndex;
                   const active = i === stepIndex;
                   return (
@@ -1675,8 +1953,12 @@ function RankRow({
           <RankBadge index={index} />
         </td>
         <td className="px-4 py-3">
-          <div className="whitespace-nowrap font-semibold text-[#241012]">{row.student_name}</div>
-          <div className="whitespace-nowrap text-[10px] text-[#8B7376]">{row.student_number || "\u2014"}</div>
+          <div className="whitespace-nowrap font-semibold text-[#241012]">
+            {row.student_name || `File row ${index + 1}`}
+          </div>
+          <div className="whitespace-nowrap text-[10px] text-[#8B7376]">
+            {row.student_number || (row.application_id != null ? "\u2014" : "from uploaded training file")}
+          </div>
         </td>
         <td className="px-4 py-3">
           <div className="max-w-[160px] truncate text-[#6B5458]" title={row.program || undefined}>
@@ -1687,7 +1969,7 @@ function RankRow({
         <td className="px-4 py-3 text-[#6B5458]">{row.sex || "\u2014"}</td>
         <td className="px-4 py-3 text-[#6B5458]">{row.scholarship}</td>
         <td className="whitespace-nowrap px-4 py-3">
-          <div className="font-semibold text-[#7B1113]">{peso(row.income_used ?? row.declared_income)}</div>
+          <div className="font-semibold text-[#7B1113]">{peso(row.income_used ?? row.declared_income ?? row.annual_income_family)}</div>
           <div className="text-[10px] text-[#8B7376]">
             {row.income_source?.startsWith("ocr")
               ? `from ITR \u00b7 typed ${peso(row.declared_income)}`

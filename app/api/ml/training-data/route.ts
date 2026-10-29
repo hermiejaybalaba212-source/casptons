@@ -5,7 +5,7 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 const BUCKET = "training-data";
-const MAX_BYTES = 3 * 1024 * 1024;
+const MAX_BYTES = 10 * 1024 * 1024;
 
 function cookieName() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
@@ -46,6 +46,25 @@ async function assertAdmin(req: Request) {
   const { data: row } = await svc.from("users").select("role").eq("auth_user_id", data.user.id).maybeSingle();
   if (!row || row.role !== "Admin") return "Only admins can manage training data.";
   return true;
+}
+
+/** Keep the admin's own filename so the panel shows exactly what was uploaded
+ *  (e.g. "FIES_PUF_2025_TRAIN.xlsx"), instead of a hardcoded placeholder.
+ *  Only strip what a storage path cannot carry: separators and leading dots. */
+function objectNameFor(original: string): string {
+  const base = original.split(/[\\/]/).pop() || "training_data.xlsx";
+  const safe = base.replace(/^[.\s]+/, "").trim();
+  return safe || "training_data.xlsx";
+}
+
+/** One file per folder: clear whatever is in `historical/` before writing, so
+ *  a newly named upload never leaves a stale sibling the loader could pick. */
+async function clearHistorical(bucket: ReturnType<typeof serviceBucket>) {
+  if (!bucket) return;
+  const { data } = await bucket.list("historical", { limit: 100 });
+  // `list()` returns `name` relative to the prefix it was called with.
+  const paths = (data || []).map((f) => `historical/${f.name}`);
+  if (paths.length) await bucket.remove(paths);
 }
 
 function serviceBucket() {
@@ -93,7 +112,7 @@ export async function POST(req: Request) {
   const isCsv = lower.endsWith(".csv");
   const isXlsx = lower.endsWith(".xlsx");
   if (!isCsv && !isXlsx) return NextResponse.json({ error: "Only .csv or .xlsx files are accepted." }, { status: 400 });
-  if (file.size > MAX_BYTES) return NextResponse.json({ error: "File must be 3 MB or smaller." }, { status: 400 });
+  if (file.size > MAX_BYTES) return NextResponse.json({ error: "File must be 10 MB or smaller." }, { status: 400 });
 
   const text = isCsv ? await file.text() : null;
   let warning: string | undefined;
@@ -109,8 +128,10 @@ export async function POST(req: Request) {
   const bucket = serviceBucket();
   if (!bucket) return NextResponse.json({ error: "Server is missing SUPABASE_SERVICE_ROLE_KEY." }, { status: 500 });
 
-  await bucket.remove(["historical/training_data.csv", "historical/training_data.xlsx"]);
-  const objectPath = isCsv ? "historical/training_data.csv" : "historical/training_data.xlsx";
+  await clearHistorical(bucket);
+  // Store under the file's own name so the panel (and the scan log) show
+  // exactly which file is being trained, e.g. FIES_PUF_2025_TRAIN.xlsx.
+  const objectPath = `historical/${objectNameFor(file.name)}`;
   const bytes = Buffer.from(await file.arrayBuffer());
   const { error: upErr } = await bucket.upload(objectPath, bytes, {
     contentType: isCsv ? "text/csv" : "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -126,7 +147,8 @@ export async function DELETE(req: Request) {
   if (auth !== true) return NextResponse.json({ error: auth }, { status: 401 });
   const bucket = serviceBucket();
   if (!bucket) return NextResponse.json({ error: "Server is missing SUPABASE_SERVICE_ROLE_KEY." }, { status: 500 });
-  const { error } = await bucket.remove(["historical/training_data.csv", "historical/training_data.xlsx"]);
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  // Clear the whole folder - the stored name now tracks the upload, so the
+  // old fixed names cannot be relied on to find it.
+  await clearHistorical(bucket);
   return NextResponse.json({ ok: true });
 }

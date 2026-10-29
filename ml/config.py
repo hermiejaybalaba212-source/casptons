@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 ML_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = ML_DIR.parent
@@ -16,6 +16,59 @@ DEFAULT_SEED = 2026
 DEFAULT_N_TREES = 100
 DEFAULT_SYNTH_SAMPLES = 800
 DEFAULT_MAX_DEPTH = 8
+
+# --- externally trained model (Google Colab export) ------------------------
+# A forest fitted in Colab is downloaded as rf_ranking_seed<seed>_colab.joblib.
+# ML_EXTERNAL_MODEL points at an exact file; otherwise the first *colab*.joblib
+# found in ml/models/ then the project root is used. ML_MODEL_MODE picks the
+# behaviour:
+#   auto   (default) - use the external model when one exists, else train here
+#   external         - require it; missing file is an error, never a silent
+#                      fallback to a locally trained forest
+#   local            - ignore any exported model and always retrain
+EXTERNAL_MODEL_ENV = "ML_EXTERNAL_MODEL"
+MODEL_MODE_ENV = "ML_MODEL_MODE"
+
+
+def external_model_path(required: bool = False) -> Optional[Path]:
+    """File for a model trained outside this process, or None when absent."""
+    mode = (os.environ.get(MODEL_MODE_ENV) or "auto").strip().lower()
+    if mode == "local":
+        if required:
+            raise FileNotFoundError(
+                f"{MODEL_MODE_ENV}=local - external model loading is disabled"
+            )
+        return None
+
+    explicit = os.environ.get(EXTERNAL_MODEL_ENV, "").strip().strip('"').strip("'")
+    candidates: List[Path] = []
+    if explicit:
+        candidates.append(Path(explicit))
+    else:
+        # Every name the exports use. rf_ranking_seed*.joblib is deliberately
+        # absent: that is the LOCAL trainer's own output, and matching it would
+        # make every run reload its previous model instead of retraining.
+        patterns = (
+            "*colab*.joblib",
+            "scholarship_rf_model.joblib",
+            "scholarship_*model*.joblib",
+        )
+        for folder in (MODEL_DIR, PROJECT_ROOT):
+            if folder.is_dir():
+                for pattern in patterns:
+                    candidates.extend(sorted(folder.glob(pattern)))
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    if required:
+        hint = f"{EXTERNAL_MODEL_ENV}=<file>" if not explicit else explicit
+        raise FileNotFoundError(
+            "no externally trained model found - expected a *colab*.joblib in "
+            f"ml/models/ or the project root (set {hint} to point at one)"
+        )
+    return None
 
 # --- financial-need scaling (pesos) ---------------------------------------
 INCOME_FLOOR = 100_000.0       # annual family income -> need score 100
@@ -34,7 +87,30 @@ W_ACADEMIC = 0.00              # academics excluded on purpose
 
 OCR_TRUST_MIN_PCT = 90.0       # typed vs ITR align >= this % = "ITR verified"
 
+# --- statutory priority flags (the no-ITR / no-income fallback) ------------
+# Points added to the priority target for every historical row (and for live
+# applicants) that carries a declared priority status. Legal basis:
+#   PWD  +15  RA 7277 (Magna Carta for Disabled Persons)
+#   IP   +15  RA 8371 (Indigenous Peoples Rights Act)
+#   Solo +10  RA 8972 (Solo Parents' Welfare Act)
+#   4Ps  +10  DSWD Pantawid Pamilyang Pilipino Program (poverty indicator)
+#   1st  +5   CHED first-generation college priority
+# When no ITR / income exists these flags - not a guess - drive the score.
+W_PWD = 15.0
+W_IP = 15.0
+W_SOLO_PARENT = 10.0
+W_FOUR_PS = 10.0
+W_FIRST_GEN = 5.0
+
+# Where the dataset-based score is applied:
+#   True  -> ONLY the rows of the uploaded historical training file are scored
+#            with it (neutral need baseline + statutory priority flags). The
+#            old income / ITR ranking for live applicants is left untouched.
+#   False -> every row uses the original income-driven formula.
+HISTORICAL_DATASET_RANKING = True
+
 HIGH_NEED_LABEL_SCORE = 55.0   # classifier label threshold
+NEUTRAL_NEED_SCORE = 50.0      # baseline when no income signal is used
 
 # --- storage --------------------------------------------------------------
 STORAGE_BUCKET = "itr-documents"

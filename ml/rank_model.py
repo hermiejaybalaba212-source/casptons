@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -22,9 +23,18 @@ import numpy as np
 from . import config as _config
 from . import csv_data as _csv_data
 from . import features as _features
+from .features import FEATURE_COLUMNS
 
 
 def _synthetic_rows(n: int, seed: int) -> List[Dict]:
+    """Seeded synthetic population blended into every fit.
+
+    Income / OCR / ITR values are generated as before; the statutory
+    priority flags are drawn at the prevalence measured in the school's
+    preprocessed historical file (PWD 1.7%, IP 15.8%, solo-parent 25.7%,
+    4Ps 11.8%, first-gen 49.2%) so the forests see the same flag
+    distribution they will see at ranking time.
+    """
     rng = np.random.default_rng(seed)
     rows: List[Dict] = []
     for _ in range(n):
@@ -49,6 +59,19 @@ def _synthetic_rows(n: int, seed: int) -> List[Dict]:
             "year_level_num": float(rng.integers(1, 6)),
             "sex_code": float(rng.integers(0, 2)),
             "academic_norm": float(np.clip(rng.normal(0.75, 0.12), 0.2, 1.0)),
+            "pwd_flag": 1.0 if rng.random() < 0.017 else 0.0,
+            "ip_flag": 1.0 if rng.random() < 0.158 else 0.0,
+            "solo_parent_flag": 1.0 if rng.random() < 0.257 else 0.0,
+            "four_ps_flag": 1.0 if rng.random() < 0.118 else 0.0,
+            "first_gen_flag": 1.0 if rng.random() < 0.492 else 0.0,
+            "age_norm": float(np.clip((rng.normal(20.5, 2.6) - 15.0) / 30.0, 0.0, 1.0)),
+            "program_code": float(rng.integers(0, 8)),
+            # PSA FIES / BIR TRAIN / CHED income features (Colab training set)
+            "annual_income_family": income,
+            "monthly_income_equiv": _features.monthly_income_equiv(income),
+            "is_train_tax_exempt": _features.is_train_tax_exempt(income),
+            "is_ched_priority_ceiling": _features.is_ched_priority_ceiling(income),
+            "itr_income_bracket": _features.itr_income_bracket(income),
         }
         row["priority_target"] = _features.priority_target(row)
         rows.append(row)
@@ -104,6 +127,23 @@ def _dataset_analytics(synth: List[Dict], csv_rows: List[Dict], real_rows: List[
         "with_income": len(incomes),
         "coverage": {"has_itr": has_itr, "ocr_verified": verified},
         "need_mean": round(float(np.mean(needs)), 2) if needs else None,
+        # statutory priority flags actually present in the fit
+        "priority_flags": {
+            "pwd": sum(1 for row in all_rows if row.get("pwd_flag")),
+            "ip": sum(1 for row in all_rows if row.get("ip_flag")),
+            "solo_parent": sum(1 for row in all_rows if row.get("solo_parent_flag")),
+            "four_ps": sum(1 for row in all_rows if row.get("four_ps_flag")),
+            "first_gen": sum(1 for row in all_rows if row.get("first_gen_flag")),
+        },
+        "priority_flag_source": {
+            "csv": {
+                "pwd": sum(1 for row in csv_rows if row.get("pwd_flag")),
+                "ip": sum(1 for row in csv_rows if row.get("ip_flag")),
+                "solo_parent": sum(1 for row in csv_rows if row.get("solo_parent_flag")),
+                "four_ps": sum(1 for row in csv_rows if row.get("four_ps_flag")),
+                "first_gen": sum(1 for row in csv_rows if row.get("first_gen_flag")),
+            },
+        },
     }
     if not incomes:
         return out
@@ -137,8 +177,17 @@ def train(
     n_trees: int = _config.DEFAULT_N_TREES,
     n_synth: int = _config.DEFAULT_SYNTH_SAMPLES,
     max_depth: int = _config.DEFAULT_MAX_DEPTH,
+    min_samples_leaf: int = 2,
+    income_ranked: bool = False,
+    csv_rows_override: Optional[List[Dict]] = None,
+    columns: Optional[List[str]] = None,
 ) -> Dict:
-    """Train both forests, persist with joblib, return analytics."""
+    """Train both forests, persist with joblib, return analytics.
+
+    ``columns`` pins the feature matrix to an explicit list - the train-only
+    run passes the Colab notebook's five TOINC-derived columns so the forest
+    here is the same model the notebook trains.
+    """
     from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
     from sklearn.metrics import (
         accuracy_score,
@@ -155,11 +204,14 @@ def train(
 
     started = time.time()
     synth = _synthetic_rows(n_synth, seed)
-    csv_rows, csv_warnings = _csv_data.load_training_csv()
+    if csv_rows_override is None:
+        csv_rows, csv_warnings = _csv_data.load_training_csv(income_ranked=income_ranked)
+    else:
+        csv_rows, csv_warnings = list(csv_rows_override), []
     rows = synth + csv_rows + list(real_rows)
     dataset = _dataset_analytics(synth, csv_rows, real_rows)
 
-    X, medians = _features.matrix(rows)
+    X, medians = _features.matrix(rows, columns=columns)
     y_cls = np.array(
         [1 if row["priority_target"] >= _config.HIGH_NEED_LABEL_SCORE else 0 for row in rows],
         dtype=np.int64,
@@ -180,7 +232,7 @@ def train(
         n_estimators=n_trees,
         max_depth=max_depth,
         min_samples_split=5,
-        min_samples_leaf=2,
+        min_samples_leaf=min_samples_leaf,
         class_weight="balanced",
         random_state=seed,
         n_jobs=-1,
@@ -191,7 +243,7 @@ def train(
         n_estimators=n_trees,
         max_depth=max_depth,
         min_samples_split=5,
-        min_samples_leaf=2,
+        min_samples_leaf=min_samples_leaf,
         random_state=seed,
         n_jobs=-1,
     )
@@ -206,9 +258,15 @@ def train(
         auc = float(roc_auc_score(y_cls_test, cls_proba))
     matrix = confusion_matrix(y_cls_test, cls_pred, labels=[0, 1]).tolist()
 
+    # The exact feature order this forest was fit on. The train-only run pins
+    # it to the notebook's five TOINC columns; everything else keeps the full
+    # 20-column list. Recording anything else makes predict() feed the forest
+    # the wrong matrix ("X has 20 features ... expecting 5").
+    used_columns = list(columns) if columns else list(_features.FEATURE_COLUMNS)
+
     importance = {
         name: round(float(value), 5)
-        for name, value in zip(_features.FEATURE_COLUMNS, reg.feature_importances_)
+        for name, value in zip(used_columns, reg.feature_importances_)
     }
 
     _config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -216,11 +274,17 @@ def train(
     payload = {
         "classifier": clf,
         "regressor": reg,
-        "feature_columns": list(_features.FEATURE_COLUMNS),
+        "feature_columns": list(used_columns),
         "medians": medians,
         "seed": seed,
         "n_trees": n_trees,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": "local",
+        "n_samples": int(len(rows)),
+        "n_real": int(len(real_rows)),
+        "n_synthetic": int(len(synth)),
+        "n_csv": int(len(csv_rows)),
+        "sklearn_version": __import__("sklearn").__version__,
         "weights": {
             "financial_need": _config.W_NEED,
             "ocr_match": _config.W_OCR,
@@ -230,10 +294,26 @@ def train(
     joblib.dump(payload, model_path, compress=3)
     size_kb = round(model_path.stat().st_size / 1024.0, 1)
 
+    # The train panel ("Machine learning train data") exists to produce THE
+    # model the main AI-Ranking scores with. The main ranking's
+    # rank_model.load_external() globs scholarship_rf_model.joblib (the same
+    # name the Colab notebook exports), but deliberately skips the local
+    # rf_ranking_seed*.joblib above - so also write the payload under that
+    # name. From then on Step 1->Step 2 "Execute AI Ranking" loads THIS trained
+    # forest instead of retraining on synthetic rows, keeping OCR+ITR ranking
+    # accurate and consistent with the notebook.
+    deployed_path: Optional[Path] = None
+    if income_ranked:
+        deployed_path = _config.MODEL_DIR / "scholarship_rf_model.joblib"
+        joblib.dump(payload, deployed_path, compress=3)
+
     return {
         "classifier": clf,
         "regressor": reg,
         "medians": medians,
+        "feature_columns": list(used_columns),
+        "external": False,
+        "external_info": None,
         "n_samples": int(len(rows)),
         "n_real": int(len(real_rows)),
         "n_synthetic": int(len(synth)),
@@ -253,19 +333,189 @@ def train(
         "feature_importance": importance,
         "model_path": str(model_path).replace("\\", "/"),
         "model_size_kb": size_kb,
+        # Set on a train-panel run: the path the main AI-Ranking will load
+        # (scholarship_rf_model.joblib). The pipeline logs it so the admin can
+        # see the model was deployed for Step 1 -> Step 2 ranking.
+        "deployed_path": str(deployed_path).replace("\\", "/") if deployed_path else None,
         "train_ms": round((time.time() - started) * 1000, 1),
     }
 
 
+def _columns_for(model, payload: Dict) -> List[str]:
+    """Feature order a loaded forest expects.
+
+    Preference order:
+    1. ``feature_names_in_`` - scikit-learn records this when the model was fit
+       on a DataFrame, which is exactly what the Colab notebook does
+       (``X = df_train[feature_cols]``). Authoritative and self-describing.
+    2. ``feature_columns`` written into the payload.
+    3. The payload's ``medians`` keys, when their count matches
+       ``n_features_in_`` - older Colab exports carry only the medians dict.
+    4. Fail loudly rather than silently feeding columns in the wrong order.
+    """
+    n_features = int(getattr(model, "n_features_in_", 0) or 0)
+
+    # feature_names_in_ is a numpy array - never truth-test it (`or []`
+    # raises "truth value of an array is ambiguous").
+    raw_names = getattr(model, "feature_names_in_", None)
+    named = [str(c) for c in raw_names] if raw_names is not None else []
+    if named:
+        if not n_features or len(named) == n_features:
+            return named
+
+    declared = [str(c) for c in (payload.get("feature_columns") or [])]
+    if declared:
+        if not n_features or len(declared) == n_features:
+            return declared
+        raise ValueError(
+            f"model declares {len(declared)} feature_columns but the forest expects "
+            f"{n_features} - the joblib payload is inconsistent"
+        )
+
+    if named:
+        return named
+
+    medians = payload.get("medians") or {}
+    keys = [str(k) for k in medians.keys()]
+    if keys and (not n_features or len(keys) == n_features):
+        return keys
+
+    raise ValueError(
+        "model payload carries no feature_names_in_, feature_columns or usable "
+        "medians dict - cannot determine the training feature order"
+    )
+
+
+def load_external(path=None, required: bool = False) -> Optional[Dict]:
+    """Load a model trained outside this process (Google Colab export).
+
+    Returns a ``trained`` dict shaped exactly like :func:`train`'s return
+    value so :func:`predict` and the ``train`` analytics event work unchanged.
+    Returns ``None`` when no external model is configured or the file is
+    missing, so callers can fall back to training locally.
+    """
+    import joblib
+
+    if path is None:
+        path = _config.external_model_path(required=required)
+    if path is None:
+        return None
+    model_path = Path(path)
+    if not model_path.is_file():
+        return None
+
+    payload = joblib.load(model_path)
+    clf = None
+    reg = None
+
+    if isinstance(payload, dict):
+        clf = payload.get("classifier") or payload.get("model")
+        reg = payload.get("regressor")
+        meta = payload
+    elif hasattr(payload, "predict"):
+        # The Colab notebook saves the bare estimator:
+        #   joblib.dump(rf_model, 'scholarship_rf_model.joblib')
+        # A classifier-only model has no regressor, so predict() derives the
+        # priority score from class probabilities instead.
+        estimator = payload
+        meta = {}
+        if hasattr(estimator, "predict_proba") and not hasattr(estimator, "feature_importances_"):
+            clf, reg = None, estimator
+        elif hasattr(estimator, "feature_importances_"):
+            clf, reg = estimator, None
+        else:
+            raise ValueError(f"{model_path.name}: unsupported estimator {type(estimator).__name__}")
+    else:
+        raise ValueError(
+            f"{model_path.name}: expected a joblib dict or a fitted estimator, "
+            f"got {type(payload).__name__}"
+        )
+
+    if clf is None and reg is None:
+        raise ValueError(
+            f"{model_path.name}: payload needs a 'classifier' and/or 'regressor' "
+            f"(found {sorted(meta.keys())})"
+        )
+
+    probe = reg or clf
+    columns = _columns_for(probe, meta)
+    medians = dict(meta.get("medians") or {})
+    for col in columns:
+        medians.setdefault(col, 0.0)
+
+    size_kb = round(model_path.stat().st_size / 1024.0, 1)
+    info = {
+        "model_path": str(model_path).replace("\\", "/"),
+        "model_size_kb": size_kb,
+        "source": meta.get("source") or "external",
+        "trained_at": meta.get("created_at"),
+        "n_features": len(columns),
+        "feature_columns": columns,
+        "seed": int(meta.get("seed") or _config.DEFAULT_SEED),
+        "n_trees": int(
+            meta.get("n_trees")
+            or getattr(probe, "n_estimators", 0)
+            or 0
+        ),
+    }
+
+    # Feature importance is available straight from the forest even when the
+    # export carries no metrics of its own.
+    importances = {}
+    if hasattr(probe, "feature_importances_"):
+        importances = {
+            name: round(float(value), 5)
+            for name, value in zip(columns, probe.feature_importances_)
+        }
+
+    return {
+        "classifier": clf,
+        "regressor": reg,
+        "medians": medians,
+        "feature_columns": columns,
+        "external": True,
+        "external_info": info,
+        "n_samples": int(meta.get("n_samples") or 0),
+        "n_real": int(meta.get("n_real") or 0),
+        "n_synthetic": int(meta.get("n_synthetic") or 0),
+        "n_csv": int(meta.get("n_csv") or 0),
+        "csv_warnings": [],
+        "dataset": None,
+        "n_trees": info["n_trees"],
+        "seed": info["seed"],
+        # An externally trained forest ships no holdout metrics for this run's
+        # applicants. The UI expects these keys, so they are reported as None
+        # rather than fabricated from training data.
+        "accuracy": None,
+        "precision": None,
+        "recall": None,
+        "f1": None,
+        "roc_auc": None,
+        "confusion_matrix": None,
+        "r2": None,
+        "rmse": None,
+        "feature_importance": importances,
+        "train_ms": 0.0,
+        **info,
+    }
+
+
 def _income_for_sort(item: Dict) -> float:
-    """Tie-break: the figure the ranking actually used, else the declared one."""
-    for key in ("income_used", "declared_income", "ocr_income"):
+    """Tie-break: the figure the ranking actually used, else the declared one.
+
+    ``annual_income_family`` is the raw TOINC / annual income that the file
+    rows carry - it must be checked, or every train-mode row ties at inf and
+    Rank 1 stops being the lowest-income household.
+    """
+    for key in ("income_used", "declared_income", "annual_income_family", "ocr_income"):
         value = item.get(key)
         if value is not None:
             try:
-                return float(value)
+                number = float(value)
             except (TypeError, ValueError):
                 continue
+            if number == number:  # skip NaN
+                return number
     return math.inf
 
 
@@ -273,10 +523,47 @@ def predict(rows: List[Dict], trained: Dict) -> List[Dict]:
     """Score every applicant and return them sorted Rank 1 = most needed."""
     if not rows:
         return []
-    X, _ = _features.matrix(rows, trained["medians"])
-    scores = trained["regressor"].predict(X)
-    labels = trained["classifier"].predict(X)
-    probabilities = trained["classifier"].predict_proba(X)[:, 1]
+    # Column order comes from the model that is about to score, not from the
+    # current FEATURE_COLUMNS - a forest exported from Google Colab may have
+    # been trained on a shorter/older feature list.
+    columns = [str(c) for c in (trained.get("feature_columns") or _features.FEATURE_COLUMNS)]
+    X, _ = _features.matrix(rows, trained["medians"], columns=columns)
+
+    reg = trained.get("regressor")
+    clf = trained.get("classifier")
+
+    # A forest fit on a DataFrame (the Colab notebook) records feature_names_in_
+    # and warns on a bare ndarray. Scoring a DataFrame with those exact column
+    # names keeps the run silent and the column order pinned.
+    probe = reg or clf
+    if probe is not None and getattr(probe, "feature_names_in_", None) is not None:
+        import pandas as pd
+
+        X = pd.DataFrame(X, columns=columns)
+
+    # Both forests available (the local trainer): use each as designed.
+    # Classifier only (the Colab notebook's export): the priority score is the
+    # probability of the "prioritised" class, scaled to 0-100 so it still reads
+    # as a priority score in the UI.
+    # Regressor only: the label is derived from the score threshold.
+    if reg is not None and clf is not None:
+        scores = reg.predict(X)
+        labels = clf.predict(X)
+        probabilities = clf.predict_proba(X)[:, 1]
+    elif clf is not None:
+        probabilities = clf.predict_proba(X)[:, 1]
+        labels = (probabilities >= 0.5).astype(int)
+        scores = np.clip(probabilities * 100.0, 0.0, 100.0)
+    elif reg is not None:
+        scores = reg.predict(X)
+        # Regressor scores are 0-100 priority points; report them as a
+        # probability so the UI's % column stays on a 0-1 scale.
+        probabilities = np.clip(np.asarray(scores, dtype=float) / 100.0, 0.0, 1.0)
+        labels = (
+            np.asarray(scores, dtype=float) >= _config.HIGH_NEED_LABEL_SCORE
+        ).astype(int)
+    else:
+        raise ValueError("trained model has neither a classifier nor a regressor")
 
     ranked: List[Dict] = []
     for row, score, label, proba in zip(rows, scores, labels, probabilities):
@@ -292,6 +579,7 @@ def predict(rows: List[Dict], trained: Dict) -> List[Dict]:
                     "year_level",
                     "sex",
                     "declared_income",
+                    "annual_income_family",
                     "ocr_income",
                     "income_used",
                     "income_source",
@@ -303,6 +591,12 @@ def predict(rows: List[Dict], trained: Dict) -> List[Dict]:
                     "financial_need_score",
                     "itr_path",
                     "priority_target",
+                    "pwd_flag",
+                    "ip_flag",
+                    "solo_parent_flag",
+                    "four_ps_flag",
+                    "first_gen_flag",
+                    "priority_bonus",
                 )},
                 "itr_trust": trust,
                 "itr_verified": trust == "verified",
@@ -312,9 +606,8 @@ def predict(rows: List[Dict], trained: Dict) -> List[Dict]:
             }
         )
 
-    # Trust gate first: ITR-verified applicants (typed income matches the
-    # scanned ITR) are ranked before everyone else; within each group the
-    # Random Forest priority score decides, Rank 1 = most in need.
+    # Original ranking order: ITR-verified applicants first, then by the
+    # Random Forest priority score (Rank 1 = most in need).
     ranked.sort(
         key=lambda item: (
             0 if item["itr_verified"] else 1,

@@ -1,4 +1,4 @@
-import sys, io, json, math, subprocess
+import sys, io, json, math, subprocess, time
 from pathlib import Path
 
 print("ISEWM Scholarship Ranking — all-in-one Colab cell")
@@ -55,6 +55,46 @@ def income_log(income):
         return float(np.log1p(150_000.0)) / float(np.log1p(INCOME_CEIL))
     return float(np.log1p(max(0.0, float(income)))) / float(np.log1p(INCOME_CEIL))
 
+# --- PSA FIES 2025 income features (must match ml/features.py exactly) ------
+TRAIN_TAX_EXEMPT_CEILING = 250_000.0
+CHED_PRIORITY_CEILING = 400_000.0
+INCOME_BRACKETS = ((100_000.0, 1), (150_000.0, 2), (200_000.0, 3),
+                   (250_000.0, 4), (300_000.0, 5), (400_000.0, 6))
+
+def monthly_income_equiv(income):
+    if income is None:
+        return float("nan")
+    return round(float(income) / 12.0, 2)
+
+def is_train_tax_exempt(income):
+    if income is None:
+        return float("nan")
+    return 1.0 if float(income) <= TRAIN_TAX_EXEMPT_CEILING else 0.0
+
+def is_ched_priority_ceiling(income):
+    if income is None:
+        return float("nan")
+    return 1.0 if float(income) <= CHED_PRIORITY_CEILING else 0.0
+
+def itr_income_bracket(income):
+    if income is None:
+        return 0.0
+    value = float(income)
+    for ceiling, label in INCOME_BRACKETS:
+        if value <= ceiling:
+            return float(label)
+    return 7.0
+
+def fies_features(income):
+    """The five PSA FIES columns, shared by every row builder here."""
+    return {
+        "annual_income_family": income if income is not None else float("nan"),
+        "monthly_income_equiv": monthly_income_equiv(income),
+        "is_train_tax_exempt": is_train_tax_exempt(income),
+        "is_ched_priority_ceiling": is_ched_priority_ceiling(income),
+        "itr_income_bracket": itr_income_bracket(income),
+    }
+
 def priority_target(row):
     need = row.get("financial_need_score", 0.0)
     ocr = row.get("ocr_match_pct", 0.0)
@@ -64,7 +104,9 @@ def priority_target(row):
     return round(100.0 * (W_NEED * (need / 100.0) + W_OCR * (ocr / 100.0) + W_ACADEMIC * academic), 4)
 
 FEATURE_COLUMNS = ["financial_need_score", "ocr_match_pct", "income_log", "has_itr",
-                   "ocr_verified", "year_level_num", "sex_code", "academic_norm"]
+                   "ocr_verified", "year_level_num", "sex_code", "academic_norm",
+                   "annual_income_family", "monthly_income_equiv", "is_train_tax_exempt",
+                   "is_ched_priority_ceiling", "itr_income_bracket"]
 
 def matrix(rows, medians=None):
     if medians is None:
@@ -184,6 +226,7 @@ def csv_rows_from_csv_text(text, warnings):
             "year_level_num": year_level_num(record.get(resolved["year_level"], "") if resolved["year_level"] else ""),
             "sex_code": sex_code(record.get(resolved["sex"], "") if resolved["sex"] else ""),
             "academic_norm": academic_norm(gwa, gpa),
+            **fies_features(income),
             "source": "csv",
             "priority_target": 0.0,
         }
@@ -237,6 +280,7 @@ def train(seed=DEFAULT_SEED, n_trees=DEFAULT_N_TREES, n_synth=DEFAULT_SYNTH, max
             "year_level_num": float(rng.integers(1, 6)),
             "sex_code": float(rng.integers(0, 2)),
             "academic_norm": float(np.clip(rng.normal(0.75, 0.12), 0.2, 1.0)),
+            **fies_features(income),
             "priority_target": 0.0,
         }
         row["priority_target"] = priority_target(row)
@@ -264,6 +308,12 @@ def train(seed=DEFAULT_SEED, n_trees=DEFAULT_N_TREES, n_synth=DEFAULT_SYNTH, max
     importance = {n: round(float(v), 5) for n, v in zip(FEATURE_COLUMNS, reg.feature_importances_)}
 
     model = {"classifier": clf, "regressor": reg, "medians": medians, "seed": seed, "n_trees": n_trees,
+             # feature_columns pins the training order on reload: without it a
+             # later run that changed FEATURE_COLUMNS would score in the wrong order.
+             "feature_columns": list(FEATURE_COLUMNS),
+             "source": "colab",
+             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+             "n_samples": len(rows), "n_synthetic": len(synth), "n_csv": len(csv_rows),
              "weights": {"financial_need": W_NEED, "ocr_match": W_OCR, "academic": W_ACADEMIC}}
     metrics = {
         "n_rows": len(rows), "n_synthetic": len(synth), "n_csv": len(csv_rows),
@@ -328,6 +378,7 @@ def build_row(applicant, ocr_result=None):
         "income_log": income_log(income_used),
         "has_itr": 1.0 if applicant.get("itr_path") or (ocr_result is not None) else 0.0,
         "ocr_verified": 1.0 if ocr is not None else 0.0,
+        **fies_features(income_used),
         "year_level_num": year_level_num(applicant.get("year_level")),
         "sex_code": sex_code(applicant.get("sex")),
         "academic_norm": academic_norm(_num(applicant.get("shs_gwa")), _num(applicant.get("college_gpa"))),

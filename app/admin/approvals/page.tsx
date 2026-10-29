@@ -10,6 +10,7 @@ import { STATUS_STYLES } from "@/lib/constants";
 import { Badge } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Spinner } from "@/components/ui/spinner";
+import { ImportedSheet } from "@/components/import/imported-sheet";
 
 const VALIDATION_TABS = [
   { key: "all" as const, label: "All", active: "bg-[#7B1113] text-white", idle: "text-[#6B5458] hover:bg-[#7B1113]/5 hover:text-[#7B1113]" },
@@ -320,6 +321,17 @@ export default function ApprovalsPage() {
           {message}
         </div>
       )}
+
+      {/* Bulk import viewer: upload the CHED approval list CSV / Excel and
+          read every row and column here, sectioned by whatever school years
+          the file itself contains (AY 2024-2025, AY 2025-2026, ...). */}
+      <ImportedSheet
+        prefer="year"
+        scope="approvals"
+        emoji="📋"
+        title="Imported approval list"
+        hint="Upload a CSV / Excel file of approved scholars - every row and column is read and shown below, grouped by school year. The file is saved on the server, so it is still here after a refresh."
+      />
 
       <div className="flex flex-wrap gap-2">
         {VALIDATION_TABS.map((tab) => (

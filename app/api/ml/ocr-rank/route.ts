@@ -20,10 +20,12 @@ export const OcrRankEvent = {
 };
 
 interface PipelinePayload {
-  mode?: "scan" | "rank" | "full";
+  mode?: "scan" | "rank" | "full" | "train";
   seed?: number;
   n_trees?: number;
   n_synth?: number;
+  max_depth?: number;
+  min_samples_leaf?: number;
   applicants?: Array<Record<string, unknown>>;
   ocr_results?: Array<Record<string, unknown>>;
 }
@@ -90,6 +92,8 @@ export async function POST(req: Request) {
     seed: payload.seed ?? 2026,
     n_trees: payload.n_trees ?? 100,
     n_synth: payload.n_synth ?? 800,
+    max_depth: payload.max_depth ?? 8,
+    min_samples_leaf: payload.min_samples_leaf ?? 2,
     applicants: Array.isArray(payload.applicants) ? payload.applicants : [],
     ocr_results: Array.isArray(payload.ocr_results) ? payload.ocr_results : [],
   };

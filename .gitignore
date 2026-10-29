@@ -69,6 +69,7 @@ eng.traineddata
 # local working files / DB dumps & notes (may contain test credentials)
 *.sql
 *.docx
+*.xlsx
 csv in applications schoalrships.txt
 updated comments.txt
 balaba-magbaril-system-Comments.docx

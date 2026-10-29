@@ -52,7 +52,12 @@ STORAGE_PREFIX = "historical/"
 _ALIASES = {
     "income": ("annual_income", "income", "family_income", "total_family_annual_income",
                "family_annual_income", "yearly_income", "declared_income", "amount",
-               "annual_income_family", "total_family_income"),
+               "annual_income_family", "total_family_income",
+               # PSA FIES PUF: TOINC = total annual family income
+               "toinc", "total_income"),
+    # PSA FIES PUF: NPCINC = net per-capita income decile (1-10). The Colab
+    # notebook's target is `NPCINC <= 4` -> low-income priority.
+    "npcinc": ("npcinc", "net_per_capita_income", "per_capita_income", "npc_inc"),
     "year_level": ("year_level", "year", "level", "grade_level", "year_lvl"),
     "sex": ("sex", "gender"),
     "gwa": ("gwa", "shs_gwa", "senior_high_gwa"),
@@ -61,6 +66,20 @@ _ALIASES = {
     "has_itr": ("has_itr", "itr", "has_itr_upload", "itr_uploaded",
                 "income_tax_return", "itr_path", "itr_file"),
     "student_name": ("student_name", "name", "full_name", "applicant"),
+    # --- statutory priority columns (the preprocessed historical TES file) ---
+    "pwd_flag": ("pwd_flag", "pwd", "disability_flag", "has_disability",
+                 "person_with_disability", "disability"),
+    "ip_flag": ("ip_flag", "indigenous_flag", "indigenous_people", "is_ip",
+                "indigenous_people_group", "ip"),
+    "solo_parent": ("solo_parent", "solo_parent_flag", "is_solo_parent",
+                    "dependent_child_of_solo_parent", "solo"),
+    "first_gen": ("first_gen", "first_generation", "first_gen_flag",
+                  "first_generation_college_student", "firstgen"),
+    "is_4ps": ("is_4ps", "four_ps", "4ps", "fourps_flag", "is_4ps_member",
+               "ps_ncct", "4ps_id"),
+    "age": ("age", "applicant_age", "age_years"),
+    "program": ("program", "course", "program_name", "complete_program",
+                "complete_program_name"),
 }
 
 
@@ -120,7 +139,7 @@ def _flag(value, default: bool) -> bool:
     return default
 
 
-def row_from(record: Dict[str, str], resolved: Dict[str, Optional[str]]) -> Optional[Dict]:
+def row_from(record: Dict[str, str], resolved: Dict[str, Optional[str]], income_ranked: bool = False) -> Optional[Dict]:
     """One CSV record -> the same feature-row shape the forests train on.
 
     A record with no usable income is kept as a *neutral* row (need score 50,
@@ -131,9 +150,10 @@ def row_from(record: Dict[str, str], resolved: Dict[str, Optional[str]]) -> Opti
     raw_income = record.get(resolved["income"], "") if resolved["income"] else ""
     income = _money(raw_income)
 
-    has_other = any(
-        resolved.get(field) for field in ("year_level", "sex", "gwa", "gpa", "ocr_match_pct", "has_itr")
-    )
+    priority_fields = ("year_level", "sex", "gwa", "gpa", "ocr_match_pct", "has_itr",
+                       "pwd_flag", "ip_flag", "solo_parent", "first_gen", "is_4ps",
+                       "age", "program")
+    has_other = any(resolved.get(field) for field in priority_fields)
     if income is None and not has_other:
         return None
 
@@ -143,11 +163,17 @@ def row_from(record: Dict[str, str], resolved: Dict[str, Optional[str]]) -> Opti
     year_text = record.get(resolved["year_level"], "") if resolved["year_level"] else ""
     sex_text = record.get(resolved["sex"], "") if resolved["sex"] else ""
 
-    ocr_default = 100.0 if _flag(record.get(resolved["has_itr"], "") if resolved["has_itr"] else None, True) else 0.0
+    def text_of(field: str):
+        return record.get(resolved[field], "") if resolved[field] else None
+
+    # A file without an income column carries no ITR data either - those rows
+    # are the school's historical records, not scanned documents.
+    itr_default = bool(resolved["income"])
+    ocr_default = 100.0 if _flag(record.get(resolved["has_itr"], "") if resolved["has_itr"] else None, itr_default) else 0.0
     raw_pct = _num(record.get(resolved["ocr_match_pct"], "")) if resolved["ocr_match_pct"] else None
     ocr_pct = float(min(max(raw_pct, 0.0), 100.0)) if raw_pct is not None else ocr_default
 
-    has_itr = 1.0 if _flag(record.get(resolved["has_itr"], "") if resolved["has_itr"] else None, True) else 0.0
+    has_itr = 1.0 if _flag(record.get(resolved["has_itr"], "") if resolved["has_itr"] else None, itr_default) else 0.0
     if has_itr < 0.5:
         ocr_pct = 0.0
 
@@ -161,13 +187,43 @@ def row_from(record: Dict[str, str], resolved: Dict[str, Optional[str]]) -> Opti
         "year_level_num": _features.year_level_num(year_text),
         "sex_code": _features.sex_code(sex_text),
         "academic_norm": _features.academic_norm(gwa, gpa),
+        # statutory priority flags (blank / junk answer = no declared flag)
+        "pwd_flag": _features.flag_value(text_of("pwd_flag")),
+        "ip_flag": _features.flag_value(text_of("ip_flag"), non_ip=True),
+        "solo_parent_flag": _features.flag_value(text_of("solo_parent")),
+        "first_gen_flag": _features.flag_value(text_of("first_gen")),
+        "four_ps_flag": _features.flag_value(text_of("is_4ps")),
+        "age_norm": _features.age_norm(text_of("age")),
+        "program_code": _features.program_code(text_of("program")),
+        # PSA FIES / BIR TRAIN / CHED income features (Colab training set)
+        "annual_income_family": income if income is not None else float("nan"),
+        "monthly_income_equiv": _features.monthly_income_equiv(income),
+        "is_train_tax_exempt": _features.is_train_tax_exempt(income),
+        "is_ched_priority_ceiling": _features.is_ched_priority_ceiling(income),
+        "itr_income_bracket": _features.itr_income_bracket(income),
         "source": "csv",
     }
     if income is None:
         row["income_missing"] = True
     if math.isnan(row["academic_norm"]):
         row["academic_norm"] = None
-    row["priority_target"] = _features.priority_target(row)
+    # Train-only proof-of-dataset: label straight from this row's income.
+    if income_ranked and income is not None:
+        row["income_ranked"] = True
+        # Colab notebook target: `NPCINC <= 4` -> Prioritized (1), else Waitlisted
+        # (0). Expressed on the 0-100 scale the forests already learn, where the
+        # classifier calls >= 55.0 "High Need".
+        npcinc = _num(record.get(resolved["npcinc"], "")) if resolved.get("npcinc") else None
+        if npcinc is not None:
+            row["npcinc"] = npcinc
+            row["notebook_target"] = 1 if npcinc <= 4 else 0
+            # The notebook's exact label: NPCINC <= 4 -> Prioritized (1).
+            # Expressed on the 0-100 scale the forests learn, where the
+            # classifier calls >= 55.0 "High Need".
+            row["priority_target"] = 100.0 if npcinc <= 4 else 0.0
+    if "priority_target" not in row:
+        row["priority_target"] = _features.priority_target(row)
+    row["priority_bonus"], row["priority_bonus_parts"] = _features.priority_flags(row)
     return row
 
 
@@ -180,7 +236,30 @@ def _read_records(csv_path: Path) -> tuple[List[Dict[str, str]], List[str]]:
             return [], ["openpyxl is not installed - cannot read .xlsx (save the sheet as CSV instead)"]
         try:
             book = load_workbook(csv_path, read_only=True, data_only=True)
-            sheet = book.active
+
+            # Pick the sheet that actually holds the data. A PSA FIES workbook
+            # ships a DICTIONARY sheet first and the household records second
+            # (FIES_PUF_2025), so blindly using book.active reads the wrong one
+            # and reports "no income column". Choose the first sheet whose
+            # header carries an income column; otherwise the widest sheet.
+            def sheet_header(ws):
+                for values in ws.iter_rows(min_row=1, max_row=1, values_only=True):
+                    return ["" if c is None else str(c).strip() for c in values]
+                return []
+
+            income_keys = {_canonical(a) for a in _ALIASES["income"]}
+            chosen = None
+            widest = None
+            for ws in book.worksheets:
+                head = sheet_header(ws)
+                canon = {_canonical(h) for h in head if h}
+                if income_keys & canon:
+                    chosen = ws
+                    break
+                if widest is None or len(head) > len(widest[1]):
+                    widest = (ws, head)
+            sheet = chosen or (widest[0] if widest else book.active)
+
             rows_iter = sheet.iter_rows(values_only=True)
             header = ["" if cell is None else str(cell).strip() for cell in next(rows_iter, []) or []]
             records: List[Dict[str, str]] = []
@@ -253,9 +332,12 @@ def _download_uploaded() -> Optional[Path]:
     return Path(handle.name)
 
 
-def load_training_csv(path: Optional[Path] = None) -> tuple[List[Dict], List[str]]:
+def load_training_csv(path: Optional[Path] = None, income_ranked: bool = False) -> tuple[List[Dict], List[str]]:
     """Read the historical training file (uploaded, or the bundled sample).
 
+    Set ``income_ranked=True`` for the train-only proof-of-dataset run: rows
+    that carry an annual income are labelled from it directly (Rank 1 = lowest
+    income) instead of the neutral historical baseline.
     Returns (rows, warnings); never raises.
     """
     temp_path: Optional[Path] = None
@@ -286,23 +368,56 @@ def load_training_csv(path: Optional[Path] = None) -> tuple[List[Dict], List[str
         if not resolved["income"]:
             warnings.append(
                 "training data has no income column — every row is kept with a neutral need score "
-                f"(accepted income headers: {', '.join(_ALIASES['income'])})"
+                "plus its statutory priority flags (accepted income headers: "
+                f"{', '.join(_ALIASES['income'])})"
             )
 
         rows: List[Dict] = []
+        seen: set = set()
+        duplicates = 0
         neutral = 0
+        # identity columns = what makes a row a *person* (for de-duplication)
+        identity_cols = [
+            name for key, name in header_map.items()
+            if key in ("student_id", "student_number", "id", "sid", "lrn", "philsys",
+                       "timestamp", "date_submitted", "email", "email_address",
+                       "contact", "contact_number", "phone", "student_name", "name")
+        ]
         for index, record in enumerate(records, start=2):
-            row = row_from(record, resolved)
+            row = row_from(record, resolved, income_ranked=income_ranked)
             if row is None:
                 warnings.append(f"training data line {index}: skipped (nothing usable)")
                 continue
+            # same de-duplication the preprocessing pipeline applies: identical
+            # feature vectors are counted once so a duplicated student cannot
+            # bias the Random Forest.
+            # De-duplication, same rule as the preprocessing pipeline: only a
+            # repeated *identity* (student id / name / timestamp / contact
+            # found in the file) is a duplicate. Two different students who
+            # happen to share every feature are both kept - and a file that
+            # carries no identity column at all was already de-duplicated
+            # upstream (preprocess_tes_form.py), so nothing is dropped here.
+            if identity_cols:
+                signature = tuple(
+                    str(record.get(col, "")).strip().lower() for col in identity_cols
+                )
+                if signature in seen:
+                    duplicates += 1
+                    continue
+                seen.add(signature)
             if row.get("income_missing"):
                 neutral += 1
-                warnings.append(
-                    f"training data line {index}: no income value — row kept "
-                    "with a neutral need score"
-                )
+                if neutral <= 3:
+                    warnings.append(
+                        f"training data line {index}: no income value — row kept "
+                        "with a neutral need score (statutory priority flags still apply)"
+                    )
             rows.append(row)
+        if duplicates:
+            warnings.append(
+                f"Preprocessing: {duplicates} duplicate row(s) removed — "
+                f"{len(rows)} unique training row(s) kept."
+            )
         if neutral:
             warnings.append(
                 f"{neutral} of {len(rows)} training row(s) have no income — "

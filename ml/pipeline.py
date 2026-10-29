@@ -11,6 +11,7 @@ preprocess, train, rank, done, error.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
@@ -41,9 +42,31 @@ THRESHOLD_LEVELS = (0.75, 0.5)
 START_TIME = time.time()
 
 
+def _json_safe(value):
+    """Recursively replace NaN / +-inf with None.
+
+    json.dumps writes a bare ``NaN`` token for float('nan'), which is not valid
+    JSON - the browser's JSON.parse then throws and silently drops the whole
+    NDJSON event (that is how a single income-less row blanked the entire
+    ranking). Numpy scalars are also unwrapped here so they hit the same check.
+    """
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        return None
+    if hasattr(value, "item") and hasattr(value, "dtype"):  # numpy scalar
+        try:
+            return _json_safe(value.item())
+        except Exception:
+            return str(value)
+    return value
+
+
 def emit(payload: dict) -> None:
     payload.setdefault("t", round(time.time() - START_TIME, 2))
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+    sys.stdout.write(json.dumps(_json_safe(payload), ensure_ascii=False, default=str, allow_nan=False) + "\n")
     sys.stdout.flush()
 
 
@@ -393,7 +416,14 @@ def main() -> int:
     mode = str(payload.get("mode") or "full")
     seed = int(payload.get("seed") or cfg.DEFAULT_SEED)
     n_trees = int(payload.get("n_trees") or cfg.DEFAULT_N_TREES)
-    n_synth = int(payload.get("n_synth") or cfg.DEFAULT_SYNTH_SAMPLES)
+    # NOTE: `or` would swallow an explicit 0 - the train-only run sends
+    # n_synth=0 so the forest fits on the uploaded file exactly as the Colab
+    # notebook does, with no synthetic rows blended in.
+    n_synth = int(payload["n_synth"]) if payload.get("n_synth") is not None else cfg.DEFAULT_SYNTH_SAMPLES
+    # Optional forest knobs - the "train" mode UI sends the Colab notebook's
+    # hyperparameters (200 trees, max_depth 3, min_samples_leaf 200).
+    max_depth = int(payload.get("max_depth") or cfg.DEFAULT_MAX_DEPTH)
+    min_samples_leaf = int(payload.get("min_samples_leaf") or 2)
     applicants = list(payload.get("applicants") or [])
     preloaded = {
         int(item["application_id"]): item
@@ -430,6 +460,16 @@ def main() -> int:
     try:
         scan_results: dict = {}
         scan_stats: dict = {}
+
+        # "train" = the Machine learning train data panel's Execute ranking:
+        # no program selection, no OCR, no Supabase applicants. The uploaded
+        # file IS the dataset - it trains the forest and its own rows are the
+        # ones ranked, exactly like the Colab notebook proof-of-dataset run.
+        if mode == "train":
+            log(
+                "Train-only run (Machine learning train data): skipping the OCR scan - "
+                "the uploaded file is the training set and the ranked set."
+            )
         needs_scan = mode in ("scan", "full", "rank") and not preloaded
 
         if needs_scan:
@@ -489,37 +529,67 @@ def main() -> int:
 
         ranking: list = []
         training: dict = {}
-        if mode in ("rank", "full"):
-            by_app = index_by_application(scan_results)
-            rows = [ft.build_row(applicant, by_app.get(int(applicant["application_id"]))) for applicant in applicants]
+        if mode in ("rank", "full", "train"):
+            if mode == "train":
+                # No Supabase applicants in this mode: the uploaded training
+                # file is the whole dataset. Its rows are preprocessed with the
+                # same feature builder, the forest trains on them, and they are
+                # the rows that come back ranked (proof of dataset).
+                from ml import csv_data as _csv_data
 
-            corrected = [r for r in rows if r.get("income_corrected")]
-            for item in corrected:
+                csv_rows, csv_warnings = _csv_data.load_training_csv(income_ranked=True)
+                if not csv_rows:
+                    raise ValueError(
+                        "No usable training rows in the uploaded file. Upload a CSV / Excel "
+                        "with an annual_income column in 'Machine learning train data' first."
+                    )
+                rows = csv_rows
+                for warning in csv_warnings:
+                    log(warning)
+                incomes = [r.get("annual_income_family") for r in rows if r.get("annual_income_family") is not None]
                 log(
-                    f"ITR income used for {item['student_name']}: {_peso(item.get('income_used'))} "
-                    f"(applicant typed {_peso(item.get('declared_income'))}) - the scanned ITR is the "
-                    "source of truth for the financial-need score."
+                    f"Loaded {len(rows)} training row(s) from the uploaded file "
+                    f"({len(incomes)} with a usable annual family income)."
                 )
-            if not corrected and any(r.get("ocr_income") is not None for r in rows):
-                log("OCR income matches the typed income - no correction needed.")
-            elif not any(r.get("ocr_income") is not None for r in rows):
-                log("No OCR income available - ranking falls back to the typed income.")
+                log(
+                    "Proof of dataset: these file rows are ranked by the same forest they "
+                    "trained - Rank 1 = lowest annual family income = highest priority."
+                )
+            else:
+                by_app = index_by_application(scan_results)
+                rows = [ft.build_row(applicant, by_app.get(int(applicant["application_id"]))) for applicant in applicants]
 
-            comparable = [r for r in rows if r["ocr_status"] == "match"]
-            log(
-                f"Preprocessing {len(rows)} applicant(s) -> {len(ft.FEATURE_COLUMNS)} features "
-                f"with NumPy (median imputation)."
-            )
-            log(
-                f"Financial-need / OCR-alignment check: {len(comparable)} of {len(rows)} applicant(s) "
-                f"match their uploaded ITR exactly."
-            )
-            verified = [r for r in rows if ft.itr_trust(r) == "verified"]
-            unverified = len(rows) - len(verified)
-            log(
-                f"Trust gate: {len(verified)} applicant(s) verified against their ITR are ranked first; "
-                f"{unverified} with a mismatching or missing ITR are ranked last."
-            )
+                corrected = [r for r in rows if r.get("income_corrected")]
+                for item in corrected:
+                    log(
+                        f"ITR income used for {item['student_name']}: {_peso(item.get('income_used'))} "
+                        f"(applicant typed {_peso(item.get('declared_income'))}) - the scanned ITR is the "
+                        "source of truth for the financial-need score."
+                    )
+                if not corrected and any(r.get("ocr_income") is not None for r in rows):
+                    log("OCR income matches the typed income - no correction needed.")
+                elif not any(r.get("ocr_income") is not None for r in rows):
+                    log("No OCR income available - ranking falls back to the typed income.")
+
+                comparable = [r for r in rows if r["ocr_status"] == "match"]
+                log(
+                    f"Preprocessing {len(rows)} applicant(s) -> {len(ft.FEATURE_COLUMNS)} features "
+                    f"with NumPy (median imputation)."
+                )
+                log(
+                    f"Financial-need / OCR-alignment check: {len(comparable)} of {len(rows)} applicant(s) "
+                    f"match their uploaded ITR exactly."
+                )
+                log(
+                    "Training basis: the uploaded historical dataset (de-duplicated + cleaned) "
+                    "trains the Random Forest FIRST; applicants are ranked AFTER that training."
+                )
+                verified = [r for r in rows if ft.itr_trust(r) == "verified"]
+                unverified = len(rows) - len(verified)
+                log(
+                    f"Trust gate: {len(verified)} applicant(s) verified against their ITR are ranked first; "
+                    f"{unverified} with a mismatching or missing ITR are ranked last."
+                )
 
             X, medians = ft.matrix(rows)
             emit(
@@ -530,14 +600,14 @@ def main() -> int:
                     "medians": {k: round(float(v), 4) for k, v in medians.items()},
                     "rows": [
                         {
-                            "application_id": r["application_id"],
-                            "student_name": r["student_name"],
-                            "income_used": r.get("income_used"),
+                            "application_id": r.get("application_id"),
+                            "student_name": r.get("student_name"),
+                            "income_used": r.get("income_used", r.get("annual_income_family")),
                             "income_source": r.get("income_source"),
                             "income_delta": r.get("income_delta"),
-                            "financial_need_score": r["financial_need_score"],
-                            "ocr_match_pct": r["ocr_match_pct"],
-                            "priority_target": r["priority_target"],
+                            "financial_need_score": r.get("financial_need_score"),
+                            "ocr_match_pct": r.get("ocr_match_pct"),
+                            "priority_target": r.get("priority_target"),
                         }
                         for r in rows
                     ],
@@ -547,35 +617,137 @@ def main() -> int:
             if not ML_WARM.is_set() and warm is not None and warm.is_alive():
                 log("Waiting for the scikit-learn import to finish...")
                 ML_WARM.wait(300)
-            log(f"Training Random Forest ({n_trees} trees, seed {seed}) on {n_synth} synthetic + {len(rows)} real rows...")
-            training = rank_model.train(rows, seed=seed, n_trees=n_trees, n_synth=n_synth)
-            if training.get("n_csv"):
-                log(
-                    f"Loaded {training['n_csv']} historical training row(s) "
-                    f"({training['n_samples']} rows total in the fit)."
-                )
-            for warning in training.get("csv_warnings") or []:
-                log(warning)
-            emit(
-                {
-                    "type": "train",
-                    **{k: v for k, v in training.items() if k not in ("classifier", "regressor", "medians")},
-                }
-            )
-            log(
-                f"Model saved with joblib -> {training['model_path']} "
-                f"({training['model_size_kb']} KB) in {training['train_ms']} ms"
-            )
 
-            ranking = rank_model.predict(rows, training)
-            emit({"type": "rank", "rows": ranking})
-            for item in ranking:
+            mode_choice = (os.environ.get(cfg.MODEL_MODE_ENV) or "auto").strip().lower()
+            external = None
+            external_error = None
+            if mode == "train":
+                # The whole point of the train-data panel is a fresh fit on the
+                # uploaded file - never reuse the externally trained artifact.
                 log(
-                    f"  #{item['rank']} {item['student_name']} - priority {item['priority_score']} "
-                    f"({item['prediction']}, need {item['financial_need_score']}, OCR {item['ocr_match_pct']}%, "
-                    f"income {_peso(item.get('income_used'))} from {item.get('income_source', 'declared')})"
+                    "Train-only run: fitting a fresh Random Forest on the uploaded file "
+                    "(the external model shortcut is bypassed)."
                 )
-            log("Ranking complete: Rank 1 = highest priority = most in need of financial assistance.")
+            else:
+                try:
+                    external = rank_model.load_external(
+                        required=(mode_choice == "external")
+                    )
+                except Exception as exc:
+                    external_error = str(exc)
+
+            if external is not None:
+                info = external.get("external_info") or {}
+                training = external
+                log(
+                    f"Using the externally trained model -> {info.get('model_path')} "
+                    f"({info.get('model_size_kb')} KB, seed {info.get('seed')}, "
+                    f"{info.get('n_trees')} trees, {info.get('n_features')} features, "
+                    f"trained {info.get('trained_at') or 'at an earlier time'})."
+                )
+                log(
+                    "Scoring with the Colab model as-is: no local refit and no "
+                    "holdout metrics for this run's applicants."
+                )
+                if external_error:
+                    log(f"External model warning: {external_error}")
+            else:
+                if external_error:
+                    log(f"External model unavailable: {external_error}")
+                log(
+                    f"Training Random Forest ({n_trees} trees, seed {seed}) on "
+                    f"{n_synth} synthetic + {len(rows)} real rows..."
+                )
+                # rank_model.train() loads the uploaded training CSV itself - in
+                # "train" mode those exact rows are already in `rows`, so pass an
+                # empty real list to avoid counting the file twice.
+                training = rank_model.train(
+                    [] if mode == "train" else rows,
+                    seed=seed, n_trees=n_trees, n_synth=n_synth,
+                    max_depth=max_depth, min_samples_leaf=min_samples_leaf,
+                    income_ranked=(mode == "train"),
+                    csv_rows_override=rows if mode == "train" else None,
+                    # Train-only = the Colab notebook exactly: fit on the five
+                    # TOINC-derived columns and nothing else.
+                    columns=list(ft.NOTEBOOK_FEATURE_COLUMNS) if mode == "train" else None,
+                )
+                if training.get("n_csv"):
+                    log(
+                        f"Loaded {training['n_csv']} historical training row(s) "
+                        f"({training['n_samples']} rows total in the fit)."
+                    )
+                for warning in training.get("csv_warnings") or []:
+                    log(warning)
+                emit(
+                    {
+                        "type": "train",
+                        **{
+                            k: v
+                            for k, v in training.items()
+                            if k not in ("classifier", "regressor", "medians")
+                        },
+                    }
+                )
+                log(
+                    f"Model saved with joblib -> {training['model_path']} "
+                    f"({training['model_size_kb']} KB) in {training['train_ms']} ms"
+                )
+                if training.get("deployed_path"):
+                    log(
+                        f"Deployed for the main AI-Ranking -> {training['deployed_path']}. "
+                        "Step 1 -> Step 2 'Execute AI Ranking' will now score applicants "
+                        "with this trained model (OCR + ITR / annual income) instead of retraining."
+                    )
+
+            if external is not None:
+                emit(
+                    {
+                        "type": "train",
+                        "external": True,
+                        "model_source": "external",
+                        "model_path": training.get("model_path"),
+                        "model_size_kb": training.get("model_size_kb"),
+                        "n_samples": training.get("n_samples"),
+                        "n_real": training.get("n_real"),
+                        "n_synthetic": training.get("n_synthetic"),
+                        "n_csv": training.get("n_csv"),
+                        "n_trees": training.get("n_trees"),
+                        "seed": training.get("seed"),
+                        "feature_columns": training.get("feature_columns"),
+                        "accuracy": None,
+                        "precision": None,
+                        "recall": None,
+                        "f1": None,
+                        "roc_auc": None,
+                        "confusion_matrix": None,
+                        "r2": None,
+                        "rmse": None,
+                        "feature_importance": {},
+                        "train_ms": 0.0,
+                    }
+                )
+
+            # The train panel ("Execute Training Data") exists only to FIT and
+            # DEPLOY the model - it does not rank the file's own rows. Ranking
+            # is the main AI Ranking's job (OCR + ITR / annual income), which
+            # scores real applicants with THIS deployed model.
+            ranking: List[Dict] = []
+            if mode == "train":
+                log(
+                    "Training data run: model fitted and deployed. Ranking is skipped here - "
+                    "use Step 1 -> Step 2 'Execute AI Ranking' to rank real applicants with this model."
+                )
+            else:
+                ranking = rank_model.predict(rows, training)
+                emit({"type": "rank", "rows": ranking})
+                for item in ranking:
+                    log(
+                        f"  #{item['rank']} {item.get('student_name') or 'File row'} - priority {item['priority_score']} "
+                        f"({item['prediction']}, need {item.get('financial_need_score')}, OCR {item.get('ocr_match_pct')}%, "
+                        f"income {_peso(item.get('income_used') or item.get('annual_income_family'))} "
+                        f"from {item.get('income_source', 'declared')})"
+                    )
+                log("Ranking complete: Rank 1 = highest priority = most in need of financial assistance.")
 
         emit(
             {

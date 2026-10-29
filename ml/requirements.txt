@@ -28,3 +28,9 @@ uvicorn>=0.34
 
 # Excel training-data support (ml/training_data.xlsx)
 openpyxl>=3.1
+
+# DataFrame column-name pinning when scoring a forest exported from Google
+# Colab (rank_model.predict wraps X in a DataFrame when the model carries
+# feature_names_in_). Also used by the standalone training script
+# (spc_scholarship_ml_training.py) that mirrors the Colab notebook.
+pandas>=2.0
