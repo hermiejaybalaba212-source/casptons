@@ -41,13 +41,6 @@ function resolvePython(): { bin: string; args: string[] } {
   }
   candidates.push({ bin: "python", args: ["-c", "import sys; print(sys.version)"] });
   candidates.push({ bin: "py", args: ["-3", "-c", "import sys; print(sys.version)"] });
-  if (process.platform === "win32") {
-    candidates.push({
-      bin: path.join("C:", "Program Files", "Python314", "python.exe"),
-      args: ["-c", "import sys; print(sys.version)"],
-    });
-  }
-
   for (const candidate of candidates) {
     try {
       const probe = spawnSync(candidate.bin, candidate.args, {
