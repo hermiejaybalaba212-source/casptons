@@ -91,6 +91,8 @@ function fill(value: unknown): string {
 /** The parsed shape the import API returns - only what merging the file's rows
     into the applications table needs. */
 interface ImportedSheetData {
+  import_id: string;
+  saved?: boolean;
   file_name: string;
   file_size: number;
   columns: string[];
@@ -104,6 +106,7 @@ interface ImportedSheetData {
 
 /** One imported file row, already shaped like the table's cells. */
 interface ImportedRowView {
+  sourceFile: string;
   studentId: string;
   name: string;
   program: string;
@@ -168,9 +171,9 @@ export default function ApplicationsPage() {
   // Every program the Admin created, fetched straight from the table so a brand
   // new (still empty) program shows up as a chip even before anyone applies.
   const [allPrograms, setAllPrograms] = useState<ScholarshipProgramOption[]>([]);
-  // The uploaded "previous scholarship applications" file (scope=applications).
-  // Its rows are merged into the main table below and its programs become chips.
-  const [importedSheet, setImportedSheet] = useState<ImportedSheetData | null>(null);
+  // Uploaded previous-application files and their rows persist in Supabase
+  // Storage and merge into the main table below.
+  const [importedSheets, setImportedSheets] = useState<ImportedSheetData[]>([]);
   const [importing, setImporting] = useState(false);
   const [deletingImport, setDeletingImport] = useState(false);
   // How many imported rows the table currently renders - the files carry
@@ -180,30 +183,46 @@ export default function ApplicationsPage() {
   const [importedCollapsed, setImportedCollapsed] = useState(true);
   const importInputRef = useRef<HTMLInputElement>(null);
 
-  // Restore the last upload so a refresh does not wipe the imported rows.
+  // Restore every upload so a refresh does not wipe the imported rows.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const res = await fetch("/api/import/parse?scope=applications");
-        if (!res.ok) return;
-        const json = (await res.json()) as Partial<ImportedSheetData> & { restored?: boolean };
+        const json = (await res.json()) as {
+          error?: string;
+          sheets?: Array<Partial<ImportedSheetData>>;
+          restored?: boolean;
+        } & Partial<ImportedSheetData>;
         if (cancelled) return;
-        if (json.restored && Array.isArray(json.rows) && Array.isArray(json.columns)) {
-          setImportedSheet({
-            file_name: String(json.file_name || "imported file"),
-            file_size: Number(json.file_size ?? 0),
-            columns: json.columns.map(String),
-            rows: json.rows as Record<string, string>[],
-            row_count: Number(json.row_count ?? json.rows.length),
-            year_column: String(json.year_column || ""),
-            group_column: String(json.group_column || ""),
-            year_kind: String(json.year_kind || ""),
-            years: Array.isArray(json.years) ? json.years.map(String) : [],
-          });
+        if (!res.ok) throw new Error(json.error || "Could not restore imported files.");
+        const restored = Array.isArray(json.sheets)
+          ? json.sheets
+          : json.restored && Array.isArray(json.rows) && Array.isArray(json.columns)
+            ? [json]
+            : [];
+        setImportedSheets(restored.flatMap((item, index) => {
+          if (!Array.isArray(item.columns) || !Array.isArray(item.rows)) return [];
+          return [{
+            import_id: String(item.import_id || `${item.file_name || "file"}-${index}`),
+            saved: true,
+            file_name: String(item.file_name || "imported file"),
+            file_size: Number(item.file_size ?? 0),
+            columns: item.columns.map(String),
+            rows: item.rows as Record<string, string>[],
+            row_count: Number(item.row_count ?? item.rows.length),
+            year_column: String(item.year_column || ""),
+            group_column: String(item.group_column || ""),
+            year_kind: String(item.year_kind || ""),
+            years: Array.isArray(item.years) ? item.years.map(String) : [],
+          }];
+        }));
+      } catch (err: unknown) {
+        if (!cancelled) {
+          const msg = err instanceof Error ? err.message : "Could not restore imported files.";
+          setMessage(msg);
+          toast.error(msg);
         }
-      } catch {
-        // A failed restore just leaves the table without imported rows.
       }
     })();
     return () => {
@@ -298,8 +317,16 @@ export default function ApplicationsPage() {
   // (Student ID / Full Name / Program / Year), so they read exactly like the
   // DB rows instead of living in a separate panel. Column names are detected
   // so any registrar export works, not just one file's headers.
-  const impCols = importedSheet
-    ? {
+  // The file rows that belong on screen for the active search. The WHOLE file
+  // is one category - "Previous Scholarship Applications" - so every row is
+  // bulked together, never split per course or year. The file carries no
+  // application status, so imported rows are shown on the "All" tab only -
+  // listing them under "Pending" would be misleading.
+  const importedRows: ImportedRowView[] = [];
+  if (importedSheets.length && !statusFilter) {
+    const q = search.trim().toLowerCase();
+    for (const importedSheet of importedSheets) {
+      const impCols = {
         studentId: pickCol(importedSheet.columns, /^student[\s_-]*(id|no|number)|^id$|^student$/i),
         last: pickCol(importedSheet.columns, /last[\s_-]*name|surname/i),
         given: pickCol(importedSheet.columns, /given[\s_-]*name|first[\s_-]*name/i),
@@ -307,28 +334,19 @@ export default function ApplicationsPage() {
         ext: pickCol(importedSheet.columns, /\bext\b|extension/i),
         program: pickCol(importedSheet.columns, /program|course/i),
         year: importedSheet.year_column || pickCol(importedSheet.columns, /year[\s_-]*level|level/i),
+      };
+      for (const row of importedSheet.rows) {
+        const last = cellVal(row, impCols.last);
+        const given = cellVal(row, impCols.given);
+        const middle = cellVal(row, impCols.middle);
+        const ext = cellVal(row, impCols.ext);
+        const name = `${last}, ${given}${ext ? ` ${ext}` : ""}${middle ? ` ${middle}` : ""}`.replace(/,\s*$/, "");
+        const studentId = cellVal(row, impCols.studentId);
+        const program = cellVal(row, impCols.program) || "No program listed";
+        const year = normalizeYearLevel(cellVal(row, impCols.year));
+        if (q && !`${studentId} ${name} ${program} ${year}`.toLowerCase().includes(q)) continue;
+        importedRows.push({ sourceFile: importedSheet.file_name, studentId, name, program, year });
       }
-    : null;
-
-  // The file rows that belong on screen for the active search. The WHOLE file
-  // is one category - "Previous Scholarship Applications" - so every row is
-  // bulked together, never split per course or year. The file carries no
-  // application status, so imported rows are shown on the "All" tab only -
-  // listing them under "Pending" would be misleading.
-  const importedRows: ImportedRowView[] = [];
-  if (importedSheet && impCols && !statusFilter) {
-    const q = search.trim().toLowerCase();
-    for (const row of importedSheet.rows) {
-      const last = cellVal(row, impCols.last);
-      const given = cellVal(row, impCols.given);
-      const middle = cellVal(row, impCols.middle);
-      const ext = cellVal(row, impCols.ext);
-      const name = `${last}, ${given}${ext ? ` ${ext}` : ""}${middle ? ` ${middle}` : ""}`.replace(/,\s*$/, "");
-      const studentId = cellVal(row, impCols.studentId);
-      const program = cellVal(row, impCols.program) || "No program listed";
-      const year = normalizeYearLevel(cellVal(row, impCols.year));
-      if (q && !`${studentId} ${name} ${program} ${year}`.toLowerCase().includes(q)) continue;
-      importedRows.push({ studentId, name, program, year });
     }
   }
   const importedRowCount = importedRows.length;
@@ -682,59 +700,77 @@ export default function ApplicationsPage() {
 
   /** Import a CSV/Excel of previous applications - parsed by the same reader
       the ML pipeline uses, saved on the server, and merged into the table. */
-  async function importSheet(file: File) {
+  async function importSheet(files: File[]) {
+    if (!files.length) return;
     setImporting(true);
-    try {
-      const form = new FormData();
-      form.append("file", file);
-      form.append("scope", "applications");
-      const res = await fetch("/api/import/parse", { method: "POST", body: form });
-      const json = (await res.json()) as ImportedSheetData & { error?: string; warning?: string; saved?: boolean };
-      if (!res.ok || json.error) throw new Error(json.error || "Import failed.");
-      setImportedSheet({
-        file_name: String(json.file_name || file.name),
-        file_size: Number(json.file_size ?? file.size),
-        columns: json.columns.map(String),
-        rows: json.rows as Record<string, string>[],
-        row_count: Number(json.row_count ?? json.rows.length),
-        year_column: String(json.year_column || ""),
-        group_column: String(json.group_column || ""),
-        year_kind: String(json.year_kind || ""),
-        years: Array.isArray(json.years) ? json.years.map(String) : [],
-      });
-      setProgramFilter("");
-      setImportedVisible(INITIAL_IMPORTED_ROWS);
-      setImportedCollapsed(true);
-      setMessage(
-        `Imported ${json.row_count.toLocaleString()} row(s) and ${json.columns.length} column(s) from ${json.file_name} - listed in the table below.` +
-          (json.saved ? " Saved on the server, so it survives a refresh." : ""),
-      );
-      toast.success(`Imported ${json.row_count.toLocaleString()} rows from ${json.file_name}.`);
-      if (json.warning) toast(json.warning, { icon: "\u26a0\ufe0f" });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Import failed.";
-      toast.error(msg);
-      setMessage(msg);
-    } finally {
-      setImporting(false);
+    const failures: string[] = [];
+    let importedCount = 0;
+    for (const file of files) {
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("scope", "applications");
+        const res = await fetch("/api/import/parse", { method: "POST", body: form });
+        const json = (await res.json()) as Partial<ImportedSheetData> & {
+          error?: string;
+          warning?: string;
+          columns?: string[];
+          rows?: Record<string, string>[];
+        };
+        if (!res.ok || json.error || !Array.isArray(json.columns) || !Array.isArray(json.rows)) {
+          throw new Error(json.error || "Import failed.");
+        }
+        const imported: ImportedSheetData = {
+          import_id: String(json.import_id || `${Date.now()}-${file.name}`),
+          saved: Boolean(json.saved),
+          file_name: String(json.file_name || file.name),
+          file_size: Number(json.file_size ?? file.size),
+          columns: json.columns.map(String),
+          rows: json.rows,
+          row_count: Number(json.row_count ?? json.rows.length),
+          year_column: String(json.year_column || ""),
+          group_column: String(json.group_column || ""),
+          year_kind: String(json.year_kind || ""),
+          years: Array.isArray(json.years) ? json.years.map(String) : [],
+        };
+        setImportedSheets((previous) => [...previous, imported]);
+        importedCount += 1;
+        if (!json.saved) failures.push(`${file.name}: ${json.warning || "file could not be saved for refresh."}`);
+        toast.success(
+          `${json.saved ? "Saved" : "Read"} ${imported.row_count.toLocaleString()} rows from ${imported.file_name}.`,
+        );
+        if (json.warning) toast(json.warning, { icon: "\u26a0\ufe0f" });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Import failed.";
+        failures.push(`${file.name}: ${msg}`);
+        toast.error(`${file.name}: ${msg}`);
+      }
     }
+    setProgramFilter("");
+    setImportedVisible(INITIAL_IMPORTED_ROWS);
+    setImportedCollapsed(true);
+    setMessage(
+      `${importedCount} of ${files.length} selected file(s) imported.` +
+        (failures.length ? ` Issues: ${failures.join(" ")}` : " All imported files are saved and will survive a refresh."),
+    );
+    setImporting(false);
   }
 
-  /** Remove the saved import - the file, its parsed copy and its table rows. */
-  async function deleteImportedSheet() {
-    if (!importedSheet || deletingImport) return;
-    if (!window.confirm(`Delete the imported file "${importedSheet.file_name}" and its ${importedSheet.row_count.toLocaleString()} row(s) from the table?`)) {
+  /** Remove one saved import - the file, its parsed copy and its table rows. */
+  async function deleteImportedSheet(target: ImportedSheetData) {
+    if (!target || deletingImport) return;
+    if (!window.confirm(`Delete the imported file "${target.file_name}" and its ${target.row_count.toLocaleString()} row(s) from the table?`)) {
       return;
     }
     setDeletingImport(true);
     try {
-      const res = await fetch("/api/import/parse?scope=applications", { method: "DELETE" });
+      const res = await fetch(`/api/import/parse?scope=applications&import_id=${encodeURIComponent(target.import_id)}`, { method: "DELETE" });
       const json = (await res.json()) as { error?: string };
       if (!res.ok || json.error) throw new Error(json.error || "Delete failed.");
-      setImportedSheet(null);
+      setImportedSheets((previous) => previous.filter((item) => item.import_id !== target.import_id));
       setProgramFilter("");
-      setMessage(`Deleted the imported file "${importedSheet.file_name}".`);
-      toast.success("Imported file removed.");
+      setMessage(`Deleted the imported file "${target.file_name}".`);
+      toast.success(`${target.file_name} removed.`);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Delete failed.");
     } finally {
@@ -772,7 +808,7 @@ export default function ApplicationsPage() {
         </div>
       )}
 
-      {applications.length === 0 && !importedSheet ? (
+      {applications.length === 0 && importedSheets.length === 0 ? (
         <EmptyState
           icon="&#128196;"
           title="No applications found"
@@ -790,11 +826,11 @@ export default function ApplicationsPage() {
                 <span className="font-semibold text-[#7B1113]">one row per application</span>
                 {" \u00b7 "}
                 <span className="text-[#6B5458]">Click View Details to open the full form, uploaded documents and status controls</span>
-                {importedSheet && (
+                {importedSheets.length > 0 && (
                   <>
                     {" \u00b7 "}
                     <span className="font-semibold text-[#7B1113]">
-                      + {importedRowCount.toLocaleString()} imported row{importedRowCount === 1 ? "" : "s"} from {importedSheet.file_name}
+                      + {importedRowCount.toLocaleString()} imported row{importedRowCount === 1 ? "" : "s"} from {importedSheets.length} file{importedSheets.length === 1 ? "" : "s"}
                     </span>
                   </>
                 )}
@@ -864,10 +900,11 @@ export default function ApplicationsPage() {
                 ref={importInputRef}
                 type="file"
                 accept=".csv,.xlsx,.xlsm,.xltx"
+                multiple
                 className="hidden"
                 onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) void importSheet(file);
+                  const files = Array.from(e.target.files || []);
+                  if (files.length) void importSheet(files);
                   e.target.value = "";
                 }}
               />
@@ -877,25 +914,26 @@ export default function ApplicationsPage() {
                 className="shrink-0 whitespace-nowrap rounded-full border border-dashed border-[#7B1113]/50 px-3 py-1.5 text-[11px] font-bold text-[#7B1113] transition hover:bg-[#7B1113]/5 disabled:opacity-50"
                 title="Import a CSV / Excel file of previous scholarship applications - its rows are listed in the same table below"
               >
-                {importing ? "\u23f3 Reading file..." : "\u{1F4DA} Import file here"}
+                {importing ? "\u23f3 Importing files..." : "\u{1F4DA} Import file here"}
               </button>
-              {importedSheet && (
+              {importedSheets.map((item) => (
                 <span
+                  key={item.import_id}
                   className="inline-flex max-w-[22rem] shrink-0 items-center gap-2 truncate rounded-full bg-[#7B1113]/10 px-3 py-1.5 text-[11px] font-bold text-[#7B1113]"
-                  title={`${importedSheet.file_name} - ${importedSheet.row_count.toLocaleString()} row(s) listed in the table below. Saved on the server, so it survives a refresh.`}
+                  title={`${item.file_name} - ${item.row_count.toLocaleString()} row(s) listed in the table below.${item.saved ? " Saved on the server, so it survives a refresh." : " Not saved on the server."}`}
                 >
-                  <span className="truncate">{"\u{1F4C4}"} {importedSheet.file_name} ({importedSheet.row_count.toLocaleString()})</span>
+                  <span className="truncate">{"\u{1F4C4}"} {item.file_name} ({item.row_count.toLocaleString()})</span>
                   <button
-                    onClick={() => void deleteImportedSheet()}
+                    onClick={() => void deleteImportedSheet(item)}
                     disabled={deletingImport}
                     className="rounded-full px-1 leading-none transition hover:bg-[#7B1113]/15 disabled:opacity-50"
-                    aria-label="Delete the imported file"
-                    title="Delete this imported file and its rows from the table"
+                    aria-label={`Delete ${item.file_name}`}
+                    title={`Delete ${item.file_name} and its rows from the table`}
                   >
                     &times;
                   </button>
                 </span>
-              )}
+              ))}
             </div>
             <div
               aria-hidden="true"
@@ -1076,29 +1114,27 @@ export default function ApplicationsPage() {
                     );
                   })}
 
-                  {/* Keep every imported row together under the uploaded file
-                      name. Do not split the file into programs, year levels,
-                      or artificial school-year groups. */}
-                  {importedSheet && importedRowCount > 0 && (
+                  {/* Keep rows from every imported file together as one historical-data group. */}
+                  {importedSheets.length > 0 && importedRowCount > 0 && (
                     <tr
                       className="cursor-pointer bg-[#7B1113]/[0.06] transition hover:bg-[#7B1113]/[0.1]"
                       onClick={() => {
                         if (importedCollapsed) {
-                          setImportedVisible(importedSheet.rows.length);
+                          setImportedVisible(importedRowCount);
                           setImportedCollapsed(false);
                         } else {
                           setImportedCollapsed(true);
                         }
                       }}
-                      title={importedCollapsed ? `Click to show all ${importedRowCount.toLocaleString()} rows from ${importedSheet.file_name}` : `Click to hide ${importedRowCount.toLocaleString()} rows from ${importedSheet.file_name}`}
+                      title={importedCollapsed ? `Click to show all ${importedRowCount.toLocaleString()} rows from ${importedSheets.length} imported files` : `Click to hide ${importedRowCount.toLocaleString()} imported rows`}
                     >
                       <td className={`${cellCls} w-10 text-center text-[#7B1113]`} aria-hidden="true">
                         {importedCollapsed ? "\u25b8" : "\u25be"}
                       </td>
                       <td className={cellCls} aria-hidden="true" />
-                      <td className={`${cellCls} text-[10px] font-bold uppercase tracking-wide text-[#8B7376]`}>Imported file</td>
+                      <td className={`${cellCls} text-[10px] font-bold uppercase tracking-wide text-[#8B7376]`}>Imported files</td>
                       <td className={`${cellCls} whitespace-nowrap text-xs font-bold text-[#7B1113]`} colSpan={2}>
-                        {importedSheet.file_name}
+                        {importedSheets.length} file{importedSheets.length === 1 ? "" : "s"}
                       </td>
                       <td className={`${cellCls} text-[11px] font-bold text-[#6B5458]`}>
                         {importedRowCount.toLocaleString()} student{importedRowCount === 1 ? "" : "s"}
@@ -1120,7 +1156,7 @@ export default function ApplicationsPage() {
                       <td className={`${cellCls} whitespace-nowrap font-bold text-[#241012]`}>
                         {row.name || "\u2014"}
                         <div className="text-[10px] font-normal text-[#8B7376]">
-                          {row.year || row.program}
+                          {row.year || row.program} &middot; {row.sourceFile}
                         </div>
                       </td>
                       <td className={cellCls}>
@@ -1176,7 +1212,7 @@ export default function ApplicationsPage() {
             <span>Programs <b className="text-[#7B1113]">{programNames.length}</b></span>
             <span className="ml-auto">
               Showing <b className="text-[#7B1113]">{filteredApps.length}</b> of {applications.length} applications
-              {importedSheet ? ` + ${importedRowCount.toLocaleString()} imported` : ""}
+              {importedSheets.length > 0 ? ` + ${importedRowCount.toLocaleString()} imported from ${importedSheets.length} file${importedSheets.length === 1 ? "" : "s"}` : ""}
               {selectedIds.size ? ` \u00b7 ${selectedIds.size} selected` : ""}
             </span>
           </div>

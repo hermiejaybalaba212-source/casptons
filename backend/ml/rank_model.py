@@ -124,6 +124,10 @@ def _dataset_analytics(synth: List[Dict], csv_rows: List[Dict], real_rows: List[
     out: Dict = {
         "sources": {"synthetic": len(synth), "csv": len(csv_rows), "real": len(real_rows)},
         "total": len(all_rows),
+        "label_sources": {
+            "observed_npcinc": sum(1 for row in all_rows if row.get("target_source") == "npcinc"),
+            "derived_proxy": sum(1 for row in all_rows if row.get("target_source") != "npcinc"),
+        },
         "with_income": len(incomes),
         "coverage": {"has_itr": has_itr, "ocr_verified": verified},
         "need_mean": round(float(np.mean(needs)), 2) if needs else None,
@@ -219,10 +223,24 @@ def train(
     y_reg = np.array([row["priority_target"] for row in rows], dtype=np.float64)
 
     stratify = y_cls if len(np.unique(y_cls)) > 1 and np.min(np.bincount(y_cls)) >= 2 else None
-    X_train, X_test, y_cls_train, y_cls_test, y_reg_train, y_reg_test = train_test_split(
+    target_is_observed = np.array(
+        [row.get("target_source") == "npcinc" for row in rows],
+        dtype=bool,
+    )
+    (
+        X_train,
+        X_test,
+        y_cls_train,
+        y_cls_test,
+        y_reg_train,
+        y_reg_test,
+        observed_train,
+        observed_test,
+    ) = train_test_split(
         X,
         y_cls,
         y_reg,
+        target_is_observed,
         test_size=0.2,
         random_state=seed,
         stratify=stratify,
@@ -235,7 +253,7 @@ def train(
         min_samples_leaf=min_samples_leaf,
         class_weight="balanced",
         random_state=seed,
-        n_jobs=-1,
+        n_jobs=_config.RF_N_JOBS,
     )
     clf.fit(X_train, y_cls_train)
 
@@ -245,18 +263,33 @@ def train(
         min_samples_split=5,
         min_samples_leaf=min_samples_leaf,
         random_state=seed,
-        n_jobs=-1,
+        n_jobs=_config.RF_N_JOBS,
     )
     reg.fit(X_train, y_reg_train)
 
     cls_pred = clf.predict(X_test)
     cls_proba = clf.predict_proba(X_test)[:, 1]
     reg_pred = reg.predict(X_test)
-
+    eval_cls_true = y_cls_test[observed_test]
+    eval_cls_pred = cls_pred[observed_test]
+    eval_cls_proba = cls_proba[observed_test]
+    eval_reg_true = y_reg_test[observed_test]
+    eval_reg_pred = reg_pred[observed_test]
+    evaluation_available = len(eval_cls_true) > 0
     auc = None
-    if len(np.unique(y_cls_test)) > 1:
-        auc = float(roc_auc_score(y_cls_test, cls_proba))
-    matrix = confusion_matrix(y_cls_test, cls_pred, labels=[0, 1]).tolist()
+    if evaluation_available and len(np.unique(eval_cls_true)) > 1:
+        auc = float(roc_auc_score(eval_cls_true, eval_cls_proba))
+    matrix = (
+        confusion_matrix(eval_cls_true, eval_cls_pred, labels=[0, 1]).tolist()
+        if evaluation_available
+        else None
+    )
+    evaluation = {
+        "available": evaluation_available,
+        "source": "observed NPCINC <= 4" if evaluation_available else "unavailable",
+        "n_test": int(len(eval_cls_true)),
+        "n_train": int(np.count_nonzero(observed_train)),
+    }
 
     # The exact feature order this forest was fit on. The train-only run pins
     # it to the notebook's five TOINC columns; everything else keeps the full
@@ -267,6 +300,20 @@ def train(
     importance = {
         name: round(float(value), 5)
         for name, value in zip(used_columns, reg.feature_importances_)
+    }
+    analytics = {
+        "evaluation": evaluation,
+        "accuracy": round(float(accuracy_score(eval_cls_true, eval_cls_pred)), 4) if evaluation_available else None,
+        "precision": round(float(precision_score(eval_cls_true, eval_cls_pred, zero_division=0)), 4) if evaluation_available else None,
+        "recall": round(float(recall_score(eval_cls_true, eval_cls_pred, zero_division=0)), 4) if evaluation_available else None,
+        "f1": round(float(f1_score(eval_cls_true, eval_cls_pred, zero_division=0)), 4) if evaluation_available else None,
+        "roc_auc": round(auc, 4) if auc is not None else None,
+        "confusion_matrix": matrix,
+        "r2": round(float(r2_score(eval_reg_true, eval_reg_pred)), 4) if len(eval_reg_true) >= 2 else None,
+        "rmse": round(float(root_mean_squared_error(eval_reg_true, eval_reg_pred)), 4) if evaluation_available else None,
+        "feature_importance": importance,
+        "dataset": dataset,
+        "train_ms": round((time.time() - started) * 1000, 1),
     }
 
     _config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -285,6 +332,8 @@ def train(
         "n_synthetic": int(len(synth)),
         "n_csv": int(len(csv_rows)),
         "sklearn_version": __import__("sklearn").__version__,
+        "persisted": False,
+        "analytics": analytics,
         "weights": {
             "financial_need": _config.W_NEED,
             "ocr_match": _config.W_OCR,
@@ -303,8 +352,10 @@ def train(
     # forest instead of retraining on synthetic rows, keeping OCR+ITR ranking
     # accurate and consistent with the notebook.
     deployed_path: Optional[Path] = None
+    persisted = False
     if income_ranked:
         deployed_path = _config.MODEL_DIR / "scholarship_rf_model.joblib"
+        payload["persisted"] = True
         joblib.dump(payload, deployed_path, compress=3)
         try:
             from . import storage as _storage
@@ -314,7 +365,10 @@ def train(
                 _config.MODEL_STORAGE_PATH,
                 deployed_path.read_bytes(),
             )
+            persisted = True
         except Exception as exc:
+            payload["persisted"] = False
+            joblib.dump(payload, deployed_path, compress=3)
             # The local artifact remains usable for this invocation; surface
             # persistence failure in analytics instead of hiding it.
             csv_warnings.append(f"Trained model could not be persisted to Storage: {exc}")
@@ -331,25 +385,17 @@ def train(
         "n_synthetic": int(len(synth)),
         "n_csv": int(len(csv_rows)),
         "csv_warnings": list(csv_warnings),
-        "dataset": dataset,
+        "dataset": analytics["dataset"],
         "n_trees": int(n_trees),
         "seed": int(seed),
-        "accuracy": round(float(accuracy_score(y_cls_test, cls_pred)), 4),
-        "precision": round(float(precision_score(y_cls_test, cls_pred, zero_division=0)), 4),
-        "recall": round(float(recall_score(y_cls_test, cls_pred, zero_division=0)), 4),
-        "f1": round(float(f1_score(y_cls_test, cls_pred, zero_division=0)), 4),
-        "roc_auc": round(auc, 4) if auc is not None else None,
-        "confusion_matrix": matrix,
-        "r2": round(float(r2_score(y_reg_test, reg_pred)), 4),
-        "rmse": round(float(root_mean_squared_error(y_reg_test, reg_pred)), 4),
-        "feature_importance": importance,
+        **analytics,
         "model_path": str(model_path).replace("\\", "/"),
         "model_size_kb": size_kb,
         # Set on a train-panel run: the path the main AI-Ranking will load
         # (scholarship_rf_model.joblib). The pipeline logs it so the admin can
         # see the model was deployed for Step 1 -> Step 2 ranking.
         "deployed_path": str(deployed_path).replace("\\", "/") if deployed_path else None,
-        "train_ms": round((time.time() - started) * 1000, 1),
+        "persisted": persisted,
     }
 
 
@@ -410,6 +456,7 @@ def load_external(path=None, required: bool = False) -> Optional[Dict]:
 
     if path is None:
         path = _config.external_model_path(required=required)
+    downloaded_from_storage = False
     if path is None:
         try:
             from . import storage as _storage
@@ -423,6 +470,7 @@ def load_external(path=None, required: bool = False) -> Optional[Dict]:
                 )
             )
             path = cached
+            downloaded_from_storage = True
         except Exception:
             path = None
     if path is None:
@@ -471,6 +519,19 @@ def load_external(path=None, required: bool = False) -> Optional[Dict]:
         medians.setdefault(col, 0.0)
 
     size_kb = round(model_path.stat().st_size / 1024.0, 1)
+    analytics = meta.get("analytics") or {}
+    evaluation_data = analytics.get("evaluation")
+    evaluation = evaluation_data if isinstance(evaluation_data, dict) else {
+        "available": False,
+        "source": "unavailable",
+        "n_test": 0,
+        "n_train": 0,
+    }
+    has_observed_evaluation = (
+        evaluation.get("available") is True
+        and evaluation.get("source") == "observed NPCINC <= 4"
+        and int(evaluation.get("n_test") or 0) > 0
+    )
     info = {
         "model_path": str(model_path).replace("\\", "/"),
         "model_size_kb": size_kb,
@@ -488,8 +549,8 @@ def load_external(path=None, required: bool = False) -> Optional[Dict]:
 
     # Feature importance is available straight from the forest even when the
     # export carries no metrics of its own.
-    importances = {}
-    if hasattr(probe, "feature_importances_"):
+    importances = dict(analytics.get("feature_importance") or {})
+    if not importances and hasattr(probe, "feature_importances_"):
         importances = {
             name: round(float(value), 5)
             for name, value in zip(columns, probe.feature_importances_)
@@ -507,22 +568,21 @@ def load_external(path=None, required: bool = False) -> Optional[Dict]:
         "n_synthetic": int(meta.get("n_synthetic") or 0),
         "n_csv": int(meta.get("n_csv") or 0),
         "csv_warnings": [],
-        "dataset": None,
+        "dataset": analytics.get("dataset"),
+        "evaluation": evaluation,
         "n_trees": info["n_trees"],
         "seed": info["seed"],
-        # An externally trained forest ships no holdout metrics for this run's
-        # applicants. The UI expects these keys, so they are reported as None
-        # rather than fabricated from training data.
-        "accuracy": None,
-        "precision": None,
-        "recall": None,
-        "f1": None,
-        "roc_auc": None,
-        "confusion_matrix": None,
-        "r2": None,
-        "rmse": None,
+        "accuracy": analytics.get("accuracy") if has_observed_evaluation else None,
+        "precision": analytics.get("precision") if has_observed_evaluation else None,
+        "recall": analytics.get("recall") if has_observed_evaluation else None,
+        "f1": analytics.get("f1") if has_observed_evaluation else None,
+        "roc_auc": analytics.get("roc_auc") if has_observed_evaluation else None,
+        "confusion_matrix": analytics.get("confusion_matrix") if has_observed_evaluation else None,
+        "r2": analytics.get("r2") if has_observed_evaluation else None,
+        "rmse": analytics.get("rmse") if has_observed_evaluation else None,
         "feature_importance": importances,
-        "train_ms": 0.0,
+        "train_ms": analytics.get("train_ms", 0.0),
+        "persisted": downloaded_from_storage or bool(meta.get("persisted")),
         **info,
     }
 

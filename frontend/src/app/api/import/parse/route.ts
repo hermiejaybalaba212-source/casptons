@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -69,8 +70,8 @@ function getToken(req: Request): string | null {
   return null;
 }
 
-/** Same guard as the ML training-data routes: only an Admin may save, read back
- *  or delete an uploaded sheet. */
+/** Only an Admin may upload or delete sheets. Authenticated CHED users may
+ *  read approval-list references through GET. */
 async function assertAdmin(req: Request) {
   const token = getToken(req);
   if (!token) return "Not authenticated.";
@@ -90,9 +91,7 @@ async function assertAdmin(req: Request) {
 async function assertAuthenticated(req: Request) {
   const token = getToken(req);
   if (!token) return "Not authenticated.";
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-  const svc = createClient(url, anon, {
+  const svc = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, {
     global: { headers: { Authorization: `Bearer ${token}` } },
     auth: { persistSession: false, autoRefreshToken: false },
   });
@@ -116,11 +115,11 @@ function objectNameFor(original: string): string {
   return base.replace(/^[.\s]+/, "").trim() || "upload.csv";
 }
 
-/** Two known object names per scope, so replacing and deleting never needs a
- *  folder listing: the raw file plus a JSON sidecar of the parsed sheet. */
-function objectsFor(scope: string, original: string) {
+/** Each imported file gets a unique storage key; same-named uploads coexist. */
+function objectsFor(scope: string, original: string, importId: string) {
   const safe = objectNameFor(original);
-  return { raw: `${scope}/${safe}`, sidecar: `${scope}/${safe}.json` };
+  const key = `${importId}-${safe}`;
+  return { raw: `${scope}/${key}`, sidecar: `${scope}/${key}.json` };
 }
 
 export async function POST(req: Request) {
@@ -197,8 +196,10 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: String(payload.error || "Could not read this file.") }, { status: 400 });
     }
 
+    const importId = randomUUID();
     const sheet = {
       ...payload,
+      import_id: importId,
       file_name: file.name,
       file_size: file.size,
     } as Record<string, unknown>;
@@ -209,12 +210,21 @@ export async function POST(req: Request) {
     try {
       const bucket = serviceBucket();
       if (!bucket) throw new Error("Server is missing SUPABASE_SERVICE_ROLE_KEY.");
-      const { raw, sidecar } = objectsFor(scope, file.name);
-      // Clear first: overwriting an object of the same name is not guaranteed.
-      await bucket.remove([raw, sidecar]).catch(() => {});
+      const { raw, sidecar } = objectsFor(scope, file.name, importId);
       const bytes = Buffer.from(await file.arrayBuffer());
-      await bucket.upload(raw, bytes, { contentType: file.type || "application/octet-stream", upsert: false });
-      await bucket.upload(sidecar, JSON.stringify(sheet), { contentType: "application/json", upsert: false });
+      const { error: rawError } = await bucket.upload(raw, bytes, {
+        contentType: file.type || "application/octet-stream",
+        upsert: false,
+      });
+      if (rawError) throw new Error(rawError.message);
+      const { error: sidecarError } = await bucket.upload(sidecar, JSON.stringify(sheet), {
+        contentType: "application/json",
+        upsert: false,
+      });
+      if (sidecarError) {
+        await bucket.remove([raw]);
+        throw new Error(sidecarError.message);
+      }
     } catch (err: unknown) {
       saveWarning = `Could not save this file for later (a refresh will lose it): ${
         err instanceof Error ? err.message : "storage unavailable"
@@ -241,6 +251,20 @@ interface RawEntry {
   metadata?: { size?: number; mimetype?: string } | null;
   updated_at?: string;
   created_at?: string;
+}
+
+type StorageBucket = ReturnType<SupabaseClient["storage"]["from"]>;
+
+async function listScopeEntries(bucket: StorageBucket, scope: string): Promise<RawEntry[]> {
+  const all: RawEntry[] = [];
+  const limit = 1000;
+  for (let offset = 0; ; offset += limit) {
+    const { data, error } = await bucket.list(scope, { limit, offset, sortBy: { column: "name", order: "asc" } });
+    if (error) throw new Error(error.message);
+    const page = (data || []) as RawEntry[];
+    all.push(...page);
+    if (page.length < limit) return all;
+  }
 }
 
 /** Re-run the reader over a stored upload, used when the JSON sidecar is
@@ -282,9 +306,7 @@ function readStoredFile(bytes: Buffer, name: string): Record<string, unknown> | 
   }
 }
 
-/** Restore the last uploaded sheet for a page so the card is still filled in
- *  after a refresh. Prefers the JSON sidecar (instant); if that is missing it
- *  re-reads the stored raw file. */
+/** Restore every uploaded sheet for a page. Sidecars avoid re-parsing workbooks. */
 export async function GET(req: Request) {
   const auth = await assertAuthenticated(req);
   if (auth !== true) return NextResponse.json({ error: auth }, { status: 401 });
@@ -297,55 +319,74 @@ export async function GET(req: Request) {
   const bucket = serviceBucket();
   if (!bucket) return NextResponse.json({ error: "Server is missing SUPABASE_SERVICE_ROLE_KEY." }, { status: 500 });
 
-  const { data: entries, error } = await bucket.list(scope, { limit: 100 });
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  let entries: RawEntry[];
+  try {
+    entries = await listScopeEntries(bucket, scope);
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not list imported files." }, { status: 500 });
+  }
 
-  const sidecars = ((entries || []) as RawEntry[]).filter((e) => e.name.endsWith(".json"));
-  const raws = ((entries || []) as RawEntry[])
+  const sidecars = entries.filter((e) => e.name.endsWith(".json"))
+    .sort((a, b) => Date.parse(b.updated_at || b.created_at || "") - Date.parse(a.updated_at || a.created_at || ""));
+  const raws = entries
     .filter((e) => !e.name.endsWith(".json"))
     .sort(
       (a, b) =>
         Date.parse(b.updated_at || b.created_at || "") - Date.parse(a.updated_at || a.created_at || ""),
     );
 
-  // Sidecar path: the parsed sheet exactly as the upload produced it.
+  const sheets: Record<string, unknown>[] = [];
+  const restoredRawNames = new Set<string>();
   for (const entry of sidecars) {
     try {
       const { data, error: dlErr } = await bucket.download(`${scope}/${entry.name}`);
       if (dlErr || !data) continue;
       const parsed = JSON.parse(await data.text()) as Record<string, unknown>;
       if (Array.isArray(parsed.columns) && Array.isArray(parsed.rows)) {
-        return NextResponse.json({ ok: true, restored: true, ...parsed });
+        sheets.push({
+          ...parsed,
+          import_id: parsed.import_id || entry.name.slice(0, -".json".length),
+          updated_at: entry.updated_at || entry.created_at,
+          restored: true,
+        });
+        restoredRawNames.add(entry.name.slice(0, -".json".length));
       }
     } catch {
-      // try the next sidecar, then fall back to the raw file below
+      // Use the corresponding raw file as a recovery path below.
     }
   }
 
-  // Fallback: re-read the newest stored raw file (used if the sidecar is gone).
-  const raw = raws[0];
-  if (!raw) return NextResponse.json({ ok: true, file: null });
-  try {
-    const { data, error: dlErr } = await bucket.download(`${scope}/${raw.name}`);
-    if (dlErr || !data) return NextResponse.json({ ok: true, file: null });
-    const bytes = Buffer.from(await data.arrayBuffer());
-    const parsed = readStoredFile(bytes, raw.name);
-    if (!parsed) return NextResponse.json({ ok: true, file: null });
-    const file_size = raw.metadata?.size ?? bytes.byteLength;
-    const original = raw.name.replace(/\\/g, "/").split("/").pop() || raw.name;
-    return NextResponse.json({
-      ok: true,
-      restored: true,
-      ...parsed,
-      file_name: original,
-      file_size,
-    });
-  } catch {
-    return NextResponse.json({ ok: true, file: null });
+  // Recover raw uploads whose sidecar was missing or unreadable.
+  for (const raw of raws) {
+    if (restoredRawNames.has(raw.name)) continue;
+    try {
+      const { data, error: dlErr } = await bucket.download(`${scope}/${raw.name}`);
+      if (dlErr || !data) continue;
+      const bytes = Buffer.from(await data.arrayBuffer());
+      const storedName = raw.name.replace(/\\/g, "/").split("/").pop() || raw.name;
+      const parsed = readStoredFile(bytes, storedName);
+      if (!parsed) continue;
+      const uniqueName = /^([0-9a-f-]{36})-(.+)$/i.exec(storedName);
+      sheets.push({
+        ...parsed,
+        import_id: uniqueName?.[1] || storedName,
+        restored: true,
+        file_name: uniqueName?.[2] || storedName,
+        file_size: raw.metadata?.size ?? bytes.byteLength,
+        updated_at: raw.updated_at || raw.created_at,
+      });
+    } catch {
+      continue;
+    }
   }
+  sheets.sort(
+    (a, b) =>
+      Date.parse(String(b.updated_at || "")) - Date.parse(String(a.updated_at || "")),
+  );
+  return NextResponse.json({ ok: true, restored: true, sheets });
 }
 
-/** Delete the saved upload for a page - removes the raw file and its sidecar. */
+/** Delete one saved upload, or all uploads when no import_id is supplied. */
 export async function DELETE(req: Request) {
   const auth = await assertAdmin(req);
   if (auth !== true) return NextResponse.json({ error: auth }, { status: 401 });
@@ -358,8 +399,19 @@ export async function DELETE(req: Request) {
   const bucket = serviceBucket();
   if (!bucket) return NextResponse.json({ error: "Server is missing SUPABASE_SERVICE_ROLE_KEY." }, { status: 500 });
 
-  const { data: entries } = await bucket.list(scope, { limit: 100 });
-  const paths = ((entries || []) as RawEntry[]).map((e) => `${scope}/${e.name}`);
+  let entries: RawEntry[];
+  try {
+    entries = await listScopeEntries(bucket, scope);
+  } catch (error) {
+    return NextResponse.json({ error: error instanceof Error ? error.message : "Could not list imported files." }, { status: 500 });
+  }
+  const importId = new URL(req.url).searchParams.get("import_id");
+  const paths = entries
+    .filter((entry) => !importId
+      || entry.name.startsWith(`${importId}-`)
+      || entry.name === `${importId}.json`
+      || entry.name === importId)
+    .map((e) => `${scope}/${e.name}`);
   if (paths.length) {
     const { error } = await bucket.remove(paths);
     if (error) return NextResponse.json({ error: error.message }, { status: 500 });

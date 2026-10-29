@@ -1,0 +1,211 @@
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import joblib
+
+from ml import features
+from ml.csv_data import _resolve, row_from
+from ml.pipeline import build_docs
+from ml.rank_model import load_external, train
+
+
+class ForestStub:
+    feature_importances_ = [0.7, 0.3]
+    n_estimators = 200
+    n_features_in_ = 2
+
+    def predict(self, rows):
+        return [0 for _ in rows]
+
+
+class RankingAnalyticsTests(unittest.TestCase):
+    def test_training_loader_marks_observed_npcinc_labels_separately(self):
+        resolved = _resolve({"toinc": "TOINC", "npcinc": "NPCINC"})
+        observed = row_from({"TOINC": "120000", "NPCINC": "4"}, resolved, income_ranked=True)
+        proxy = row_from({"TOINC": "120000"}, resolved, income_ranked=True)
+
+        self.assertEqual(observed["priority_target"], 100.0)
+        self.assertEqual(observed["target_source"], "npcinc")
+        self.assertEqual(proxy["target_source"], "income_proxy")
+
+    def test_build_docs_only_includes_selected_applicant_itr_files(self):
+        applicants = [
+            {
+                "itr_path": f"student/{index}.png",
+                "application_id": index,
+                "declared_income": 100_000,
+            }
+            for index in range(1, 10)
+        ]
+        bucket_files = [
+            {"path": f"student/{index}.png", "size": 50_000, "updated_at": None}
+            for index in range(1, 41)
+        ]
+
+        with patch("ml.pipeline.storage.list_all", return_value=bucket_files):
+            docs = build_docs(applicants)
+
+        self.assertEqual(len(docs), 9)
+        self.assertTrue(all(doc["linked"] for doc in docs))
+        self.assertEqual({doc["application_id"] for doc in docs}, set(range(1, 10)))
+
+    def test_external_model_restores_saved_training_analytics(self):
+        analytics = {
+            "accuracy": 0.741,
+            "precision": 0.755,
+            "recall": 0.802,
+            "f1": 0.777,
+            "roc_auc": 0.7945,
+            "evaluation": {
+                "available": True,
+                "source": "observed NPCINC <= 4",
+                "n_test": 200,
+                "n_train": 800,
+            },
+            "confusion_matrix": [[100, 20], [15, 80]],
+            "r2": 0.61,
+            "rmse": 12.3,
+            "feature_importance": {"annual_income_family": 0.7, "year_level": 0.3},
+            "dataset": {"total": 10_006, "sources": {"csv": 10_006, "synthetic": 0, "real": 0}},
+            "train_ms": 3_732.4,
+        }
+        payload = {
+            "regressor": ForestStub(),
+            "feature_columns": ["annual_income_family", "year_level"],
+            "n_samples": 10_006,
+            "n_csv": 10_006,
+            "n_trees": 200,
+            "analytics": analytics,
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            model_path = Path(directory) / "scholarship_rf_model.joblib"
+            joblib.dump(payload, model_path)
+
+            model = load_external(path=model_path)
+
+        self.assertEqual(model["accuracy"], analytics["accuracy"])
+        self.assertEqual(model["f1"], analytics["f1"])
+        self.assertEqual(model["roc_auc"], analytics["roc_auc"])
+        self.assertEqual(model["confusion_matrix"], analytics["confusion_matrix"])
+        self.assertEqual(model["dataset"], analytics["dataset"])
+        self.assertEqual(model["evaluation"], analytics["evaluation"])
+        self.assertEqual(model["feature_importance"], analytics["feature_importance"])
+
+    def test_external_model_hides_legacy_proxy_metrics_without_label_provenance(self):
+        payload = {
+            "regressor": ForestStub(),
+            "feature_columns": ["annual_income_family", "year_level"],
+            "analytics": {"accuracy": 0.99, "f1": 0.99, "roc_auc": 1.0},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            model_path = Path(directory) / "legacy.joblib"
+            joblib.dump(payload, model_path)
+            model = load_external(path=model_path)
+
+        self.assertFalse(model["evaluation"]["available"])
+        self.assertIsNone(model["accuracy"])
+        self.assertIsNone(model["f1"])
+        self.assertIsNone(model["roc_auc"])
+
+    def test_training_persists_analytics_with_deployed_model(self):
+        rows = []
+        for index in range(60):
+            income = 30_000 + index * 10_000
+            label = index % 2
+            rows.append(
+                {
+                    "annual_income_family": income,
+                    "monthly_income_equiv": features.monthly_income_equiv(income),
+                    "is_train_tax_exempt": features.is_train_tax_exempt(income),
+                    "is_ched_priority_ceiling": features.is_ched_priority_ceiling(income),
+                    "itr_income_bracket": features.itr_income_bracket(income),
+                    "priority_target": 100.0 if label else 0.0,
+                    "target_source": "npcinc",
+                    "npcinc": 4 if label else 5,
+                    "income_used": income,
+                    "financial_need_score": features.financial_need_score(income),
+                    "has_itr": 1,
+                    "ocr_verified": 1,
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory)
+            with (
+                patch("ml.rank_model._config.MODEL_DIR", model_dir),
+                patch("ml.storage.upload"),
+            ):
+                trained = train(
+                    [],
+                    seed=42,
+                    n_trees=5,
+                    n_synth=0,
+                    max_depth=3,
+                    min_samples_leaf=1,
+                    income_ranked=True,
+                    csv_rows_override=rows,
+                    columns=features.NOTEBOOK_FEATURE_COLUMNS,
+                )
+                restored = load_external(path=trained["deployed_path"])
+                payload = joblib.load(trained["deployed_path"])
+
+        self.assertTrue(trained["persisted"])
+        self.assertTrue(trained["evaluation"]["available"])
+        self.assertEqual(trained["evaluation"]["n_test"], 12)
+        self.assertEqual(payload["analytics"]["accuracy"], trained["accuracy"])
+        self.assertEqual(restored["accuracy"], trained["accuracy"])
+        self.assertEqual(restored["f1"], trained["f1"])
+        self.assertEqual(restored["roc_auc"], trained["roc_auc"])
+        self.assertEqual(restored["dataset"], trained["dataset"])
+        self.assertEqual(restored["evaluation"], trained["evaluation"])
+        self.assertTrue(restored["persisted"])
+
+    def test_income_proxy_targets_are_not_reported_as_model_accuracy(self):
+        rows = []
+        for index in range(60):
+            income = 30_000 + index * 10_000
+            need = features.financial_need_score(income)
+            rows.append(
+                {
+                    "annual_income_family": income,
+                    "monthly_income_equiv": features.monthly_income_equiv(income),
+                    "is_train_tax_exempt": features.is_train_tax_exempt(income),
+                    "is_ched_priority_ceiling": features.is_ched_priority_ceiling(income),
+                    "itr_income_bracket": features.itr_income_bracket(income),
+                    "priority_target": need,
+                    "income_used": income,
+                    "financial_need_score": need,
+                    "has_itr": 1,
+                    "ocr_verified": 1,
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("ml.rank_model._config.MODEL_DIR", Path(directory)):
+                trained = train(
+                    [],
+                    seed=42,
+                    n_trees=5,
+                    n_synth=0,
+                    max_depth=3,
+                    min_samples_leaf=1,
+                    income_ranked=True,
+                    csv_rows_override=rows,
+                    columns=features.NOTEBOOK_FEATURE_COLUMNS,
+                )
+
+        self.assertFalse(trained["evaluation"]["available"])
+        self.assertEqual(trained["evaluation"]["n_test"], 0)
+        self.assertIsNone(trained["accuracy"])
+        self.assertIsNone(trained["f1"])
+        self.assertIsNone(trained["roc_auc"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -217,12 +217,14 @@ def row_from(record: Dict[str, str], resolved: Dict[str, Optional[str]], income_
         if npcinc is not None:
             row["npcinc"] = npcinc
             row["notebook_target"] = 1 if npcinc <= 4 else 0
+            row["target_source"] = "npcinc"
             # The notebook's exact label: NPCINC <= 4 -> Prioritized (1).
             # Expressed on the 0-100 scale the forests learn, where the
             # classifier calls >= 55.0 "High Need".
             row["priority_target"] = 100.0 if npcinc <= 4 else 0.0
     if "priority_target" not in row:
         row["priority_target"] = _features.priority_target(row)
+    row.setdefault("target_source", "income_proxy")
     row["priority_bonus"], row["priority_bonus_parts"] = _features.priority_flags(row)
     return row
 

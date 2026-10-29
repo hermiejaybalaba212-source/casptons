@@ -14,7 +14,7 @@ income the applicant typed, then trains a Random Forest that ranks applicants so
 | Numerics, feature matrix, median imputation | NumPy | 2.5.3 |
 | Median/rank maths inside the preprocessor | SciPy | 1.18.1 |
 | Text detection + recognition (OCR) | rapidocr-onnxruntime (PP-OCRv3) | 1.2.3 |
-| OCR inference runtime | onnxruntime-directml (GPU) | 1.24.4 |
+| OCR inference runtime | ONNX Runtime (CPU on Vercel, DirectML GPU on Windows) | 1.24.4+ |
 | OCR model OpenCV dependency | opencv-python | 5.0.0.93 |
 | Random Forest classifier + regressor, metrics | scikit-learn | 1.9.1 |
 | Model persistence (`rf_ranking_seed2026.joblib`) | joblib | 1.6.0 |
@@ -30,7 +30,7 @@ last so it replaces the stock ONNX runtime).
 - `ocr_engine.py` - RapidOCR wrapper: DirectML execution provider, keyword-based
   extraction of the family annual income, declared-vs-OCR comparison.
 - `cache.py` - OCR result cache keyed by `path|size|updated_at` (skips unchanged files).
-- `features.py` - the 8 model features, financial-need score, priority target.
+- `features.py` - the model feature set, financial-need score, priority target.
 - `rank_model.py` - synthetic training rows, RandomForest fit, metrics, joblib dump.
 - `storage.py` - recursive bucket listing + signed URL download (service role key).
 - `pipeline.py` - NDJSON CLI: `echo '{...}' | python ml\pipeline.py`.
@@ -55,6 +55,15 @@ Every event carries `t` = seconds since the process started.
 
 The regressor predicts `priority_score` (sorted descending -> Rank 1) and the
 classifier reports `High Need` / `Low Need`.
+
+The dataset summary and model analytics are stored inside the deployed model
+artifact in Supabase Storage. Accuracy, precision, recall, F1, ROC-AUC, R², and
+RMSE are evaluated only on held-out rows with an observed `NPCINC` target
+(`NPCINC <= 4`); income-derived proxy labels are used for ranking but never
+reported as independent model-quality metrics. If the uploaded dataset has no
+observed `NPCINC` labels, the UI says independent evaluation is unavailable.
+Later program rankings load and display the same saved model analytics; OCR
+analytics are separate and cover only the selected program's linked ITR files.
 
 ## Performance on the reference machine (AMD Athlon 300GE, 2C/4T)
 

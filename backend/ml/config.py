@@ -27,6 +27,8 @@ DEFAULT_SEED = 2026
 DEFAULT_N_TREES = 100
 DEFAULT_SYNTH_SAMPLES = 800
 DEFAULT_MAX_DEPTH = 8
+# Serverless and non-Windows runtimes cannot create joblib workers reliably.
+RF_N_JOBS = 1 if os.environ.get("VERCEL") or os.name != "nt" else -1
 
 # --- externally trained model (Google Colab export) ------------------------
 # A forest fitted by Execute Training Data is deployed as

@@ -209,21 +209,28 @@ interface TrainInfo {
   n_real: number;
   n_synthetic: number;
   n_csv?: number;
-  dataset?: TrainDataset;
+  dataset?: TrainDataset | null;
   // Set when the run scored with a model trained earlier (the Execute Training
   // Data panel's scholarship_rf_model.joblib) instead of refitting locally.
   external?: boolean;
   model_source?: string;
+  persisted?: boolean;
+  evaluation?: {
+    available: boolean;
+    source: string;
+    n_test: number;
+    n_train: number;
+  };
   n_trees: number;
   seed: number;
-  accuracy: number;
-  precision: number;
-  recall: number;
-  f1: number;
+  accuracy: number | null;
+  precision: number | null;
+  recall: number | null;
+  f1: number | null;
   roc_auc: number | null;
-  confusion_matrix: number[][];
-  r2: number;
-  rmse: number;
+  confusion_matrix: number[][] | null;
+  r2: number | null;
+  rmse: number | null;
   feature_importance: Record<string, number>;
   model_path: string;
   model_size_kb: number;
@@ -673,9 +680,9 @@ export default function MLRankingPage() {
           pushLog({ msg: `  [${i + 1}/${queued.length}] ${a.itr_path} - ${a.student_name} (typed ${peso(a.annual_income_family)})` }),
         );
       } else if (!isTrain) {
-        pushLog({ msg: "No ITR file is linked to a pending applicant yet - scanning the storage bucket only." });
+        pushLog({ msg: "No ITR file is linked to an applicant in this program; no documents will be scanned." });
       }
-      if (!isTrain) pushLog({ msg: "Handing the documents to the OCR engine (rapidocr + onnxruntime DML)..." });
+      if (queued.length) pushLog({ msg: "Handing this program's linked ITR documents to the OCR engine..." });
 
       const res = await fetch(PIPELINE_API, {
         method: "POST",
@@ -820,7 +827,9 @@ export default function MLRankingPage() {
               t: event.t as number | undefined,
               msg: isExternal
                 ? `Using deployed Random Forest: ${modelPath} (${Number(event.n_trees) || 0} trees, ${Array.isArray(event.feature_columns) ? event.feature_columns.length : 0} features). Holdout accuracy metrics are not included in this ranking run.`
-                : `Random Forest trained: accuracy ${event.accuracy != null ? fpct(Number(event.accuracy)) : "n/a"}, F1 ${event.f1 != null ? fpct(Number(event.f1)) : "n/a"}, ROC-AUC ${event.roc_auc != null ? fpct(Number(event.roc_auc), 2) : "n/a"}.`,
+                : event.evaluation && (event.evaluation as { available?: boolean }).available
+                  ? `Random Forest trained: observed-label holdout accuracy ${event.accuracy != null ? fpct(Number(event.accuracy)) : "n/a"}, F1 ${event.f1 != null ? fpct(Number(event.f1)) : "n/a"}, ROC-AUC ${event.roc_auc != null ? fpct(Number(event.roc_auc), 2) : "n/a"}.`
+                  : "Random Forest trained, but no observed NPCINC labels were available for independent evaluation; proxy-label metrics are not reported.",
             });
           } else if (type === "rank") {
             setPhase("ranking");
@@ -883,7 +892,9 @@ export default function MLRankingPage() {
           mode === "scan"
             ? `OCR scan finished in ${seconds}s \u2014 ${finalAnalytics?.income_detected ?? 0} of ${finalAnalytics?.documents_scanned ?? 0} ITR image(s) produced an income value.`
             : isTrain
-              ? `Train-only run finished in ${seconds}s \u2014 the Random Forest fit on the uploaded file and ranked its ${finalRows.length} row(s). Rank 1 = lowest annual family income.`
+              ? `Train-only run finished in ${seconds}s \u2014 the Random Forest fit on the uploaded file${
+                  finalTrainInfo?.persisted ? " and the model plus analytics were saved to Storage" : ", but the model could not be saved to persistent Storage"
+                }.`
               : `Ranking complete in ${seconds}s \u2014 ${finalRows.length} applicant(s) prioritized. Rank 1 = most in need of financial assistance.`,
         );
 
@@ -1175,7 +1186,7 @@ export default function MLRankingPage() {
           <div>
             <p className="text-sm font-bold text-[#241012]">AI OCR + Random Forest Ranking</p>
             <p className="mt-0.5 text-[11px] text-[#6B5458]">
-              OCR reads every ITR for the declared income, the Random Forest ranks on it &middot;{" "}
+              OCR reads each ITR linked to this program&rsquo;s applicants, then the Random Forest ranks them &middot;{" "}
               <span className="font-semibold text-[#7B1113]">Rank 1 = most in need of financial assistance</span>
               {selectedProgramId && (
                 <>
@@ -1358,7 +1369,7 @@ export default function MLRankingPage() {
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] leading-5 text-[#6B5458]">
               <span className="text-[10px] font-extrabold uppercase tracking-wide text-[#7B1113]">OCR</span>
               <span>
-                <b className="text-[#241012]">{ocrAnalytics.documents_scanned}</b> ITRs
+                <b className="text-[#241012]">{ocrAnalytics.documents_scanned}</b> ITRs (selected program)
               </span>
               <span className="text-[#D3C8C4]">|</span>
               <span title="ITR images where an income figure was detected">
@@ -1411,7 +1422,43 @@ export default function MLRankingPage() {
                   </span>
                 ))}
               <span className="text-[#D3C8C4]">|</span>
-              <span className="font-bold text-emerald-700">saved {"\u2713"}</span>
+              <span
+                className={`font-bold ${trainInfo.persisted ? "text-emerald-700" : "text-red-700"}`}
+                title={
+                  trainInfo.persisted
+                    ? "The model and its training analytics are persisted in Supabase Storage."
+                    : "This model exists only in the current runtime and may not survive another serverless invocation."
+                }
+              >
+                {trainInfo.persisted ? `saved \u2713` : "not saved to Storage"}
+              </span>
+            </div>
+          )}
+          {trainInfo && (
+            <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-[#241012]/[0.06] pt-2 text-[11px] leading-5 text-[#6B5458]">
+              <span
+                className="text-[10px] font-extrabold uppercase tracking-wide text-[#7B1113]"
+                title="Only held-out rows with an observed NPCINC label are used to calculate model-quality metrics."
+              >
+                Model evaluation
+              </span>
+              {trainInfo.evaluation?.available ? (
+                <>
+                  <span>
+                    Tested on <b className="text-[#241012]">{trainInfo.evaluation.n_test.toLocaleString()}</b> held-out labeled rows
+                    {" \u00b7 "}label: <b className="text-[#241012]">observed NPCINC &le; 4</b>
+                  </span>
+                  <span>accuracy <b className="text-[#241012]">{fpct(trainInfo.accuracy, 1)}</b></span>
+                  <span>precision <b className="text-[#241012]">{fpct(trainInfo.precision, 1)}</b></span>
+                  <span>recall <b className="text-[#241012]">{fpct(trainInfo.recall, 1)}</b></span>
+                  <span>F1 <b className="text-[#241012]">{fpct(trainInfo.f1, 1)}</b></span>
+                  <span>ROC-AUC <b className="text-[#241012]">{fpct(trainInfo.roc_auc, 1)}</b></span>
+                </>
+              ) : (
+                <span className="font-semibold text-amber-800">
+                  Not independently evaluated: the file has no observed NPCINC labels. Income-derived priority is used for ranking, not model-accuracy claims.
+                </span>
+              )}
             </div>
           )}
           {trainInfo?.dataset && (
@@ -1480,9 +1527,13 @@ export default function MLRankingPage() {
             <div>
               <p className="text-sm font-bold text-[#241012]">
                 Training data result
-                <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700">
-                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                  model ready
+                <span className={`ml-2 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+                  lastRun.trainInfo?.persisted ? "bg-emerald-500/10 text-emerald-700" : "bg-red-100 text-red-700"
+                }`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${
+                    lastRun.trainInfo?.persisted ? "bg-emerald-500" : "bg-red-500"
+                  }`} />
+                  {lastRun.trainInfo?.persisted ? "model saved" : "model not persisted"}
                 </span>
               </p>
               <p className="mt-0.5 text-[11px] text-[#6B5458]">
@@ -1491,7 +1542,9 @@ export default function MLRankingPage() {
                 {" \u00b7 "}finished {lastRun.finishedAt}
                 {" \u00b7 "}
                 <span className="font-semibold text-[#7B1113]">
-                  this model is used automatically by Execute AI Ranking
+                  {lastRun.trainInfo?.persisted
+                    ? "this model is used automatically by Execute AI Ranking"
+                    : "save to Storage must succeed before later rankings can reuse this model"}
                 </span>
               </p>
             </div>
@@ -1515,27 +1568,29 @@ export default function MLRankingPage() {
 
           <div className="border-b border-[#241012]/[0.07] bg-[#FAF7F5]/60 px-5 py-3 text-[11px] leading-5 text-[#6B5458]">
             <b className="text-[#241012]">How to read these results:</b>{" "}
-            the model was tested on a held-out portion of the uploaded file. Higher percentages mean
-            better agreement with the known training labels; they are indicators of model quality,
-            not a guarantee that every applicant will be ranked correctly.
+            {lastRun.trainInfo?.evaluation?.available
+              ? `Metrics compare predictions against ${lastRun.trainInfo.evaluation.n_test.toLocaleString()} held-out records with observed NPCINC labels. They indicate agreement with those labels, not a guarantee for every applicant.`
+              : "This upload has no observed NPCINC labels, so genuine held-out model-quality metrics are unavailable. Ranking still uses the trained model, but proxy targets are not presented as accuracy."}
           </div>
-          {/* Holdout metrics straight from the fit (accuracy / F1 / ROC-AUC). */}
+          {/* Genuine holdout metrics are shown only for observed NPCINC labels. */}
           {lastRun.trainInfo && (
             <div className="grid grid-cols-2 gap-px border-b border-[#241012]/[0.07] bg-[#241012]/[0.07] sm:grid-cols-4">
               {[
                 {
                   label: "Overall accuracy",
-                  value: fpct(lastRun.trainInfo.accuracy, 1),
-                  title: "Percentage of held-out rows classified correctly.",
+                  value: lastRun.trainInfo.evaluation?.available ? fpct(lastRun.trainInfo.accuracy, 1) : "Not evaluated",
+                  title: "Percentage of held-out rows with observed NPCINC labels classified correctly.",
                 },
                 {
                   label: "Priority detection (F1)",
-                  value: fpct(lastRun.trainInfo.f1, 1),
+                  value: lastRun.trainInfo.evaluation?.available ? fpct(lastRun.trainInfo.f1, 1) : "Not evaluated",
                   title: "Balance between finding priority applicants and avoiding incorrect priority labels.",
                 },
                 {
                   label: "Ranking separation (ROC-AUC)",
-                  value: lastRun.trainInfo.roc_auc != null ? fpct(lastRun.trainInfo.roc_auc, 1) : "n/a",
+                  value: lastRun.trainInfo.evaluation?.available
+                    ? lastRun.trainInfo.roc_auc != null ? fpct(lastRun.trainInfo.roc_auc, 1) : "Unavailable"
+                    : "Not evaluated",
                   title: "How well the model separates priority from non-priority rows. 50% is random; 100% is perfect.",
                 },
                 { label: "Deployed model", value: "scholarship_rf_model.joblib", title: "This model is used by Execute AI Ranking." },
@@ -1588,7 +1643,7 @@ export default function MLRankingPage() {
         <EmptyState
           icon="&#129302;"
           title="No ranking generated yet"
-          hint="Select a program, then click Execute AI Ranking — the OCR reads every ITR automatically and the Random Forest ranks the applicants."
+          hint="Select a program, then click Execute AI Ranking — OCR scans only the ITRs linked to applicants in that program."
         />
       ) : (
         <div className="overflow-hidden rounded-2xl border border-[#241012]/[0.07] bg-white shadow-sm">

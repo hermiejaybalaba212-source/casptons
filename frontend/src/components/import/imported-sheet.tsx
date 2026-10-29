@@ -9,6 +9,9 @@ type SheetRow = Record<string, string>;
 
 interface ParsedSheet {
   ok?: boolean;
+  import_id: string;
+  saved?: boolean;
+  updated_at?: string;
   columns: string[];
   rows: SheetRow[];
   row_count: number;
@@ -183,47 +186,68 @@ export function ImportedSheet({
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState("");
-  const [sheet, setSheet] = useState<ParsedSheet | null>(null);
+  const [sheets, setSheets] = useState<ParsedSheet[]>([]);
+  const [activeSheetId, setActiveSheetId] = useState("");
   const [activeGroup, setActiveGroup] = useState("");
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({});
   const [visible, setVisible] = useState<Record<string, number>>({});
 
-  // Keep the parent in sync with whatever file this card holds.
+  const sheet = sheets.find((item) => item.import_id === activeSheetId) || sheets[0] || null;
+
+  // Keep the parent in sync with the currently selected file.
   useEffect(() => {
     onSheet?.(sheet);
   }, [sheet, onSheet]);
 
-  // Restore the last upload for this page, so a refresh does not wipe it.
+  // Restore every upload for this page, so a refresh does not wipe the list.
   useEffect(() => {
     let cancelled = false;
-    setSheet(null);
-    setError("");
     (async () => {
       try {
         const res = await fetch(`/api/import/parse?scope=${scope}`);
-        const json = (await res.json()) as Partial<ParsedSheet> & { error?: string; restored?: boolean };
+        const json = (await res.json()) as {
+          error?: string;
+          sheets?: Array<Partial<ParsedSheet>>;
+          columns?: string[];
+          rows?: SheetRow[];
+          restored?: boolean;
+        };
         if (cancelled) return;
         if (!res.ok) {
-          if (json.error) setError(json.error);
+          setError(json.error || "Could not restore uploaded files.");
           return;
         }
-        if (json.restored && Array.isArray(json.columns) && Array.isArray(json.rows)) {
-          setSheet({
-            columns: json.columns.map(String),
-            rows: json.rows as SheetRow[],
-            row_count: Number(json.row_count ?? json.rows.length),
-            sheet: String(json.sheet || json.file_name || ""),
-            years: Array.isArray(json.years) ? json.years.map(String) : [],
-            year_column: String(json.year_column || ""),
-            year_kind: String(json.year_kind || ""),
-            year_counts: (json.year_counts as Record<string, number>) || {},
-            group_column: String(json.group_column || ""),
-            file_name: String(json.file_name || ""),
-            file_size: Number(json.file_size ?? 0),
-          });
+        const restored = Array.isArray(json.sheets)
+          ? json.sheets
+          : json.restored && Array.isArray(json.columns) && Array.isArray(json.rows)
+            ? [json as Partial<ParsedSheet>]
+            : [];
+        const parsed = restored.flatMap((item, index) => {
+          if (!Array.isArray(item.columns) || !Array.isArray(item.rows)) return [];
+          return [{
+            import_id: String(item.import_id || `${item.file_name || "file"}-${index}`),
+            saved: true,
+            updated_at: item.updated_at ? String(item.updated_at) : undefined,
+            columns: item.columns.map(String),
+            rows: item.rows as SheetRow[],
+            row_count: Number(item.row_count ?? item.rows.length),
+            sheet: String(item.sheet || item.file_name || ""),
+            years: Array.isArray(item.years) ? item.years.map(String) : [],
+            year_column: String(item.year_column || ""),
+            year_kind: String(item.year_kind || ""),
+            year_counts: (item.year_counts as Record<string, number>) || {},
+            group_column: String(item.group_column || ""),
+            file_name: String(item.file_name || ""),
+            file_size: Number(item.file_size ?? 0),
+          }];
+        });
+        setSheets(parsed);
+        setActiveSheetId(parsed[0]?.import_id || "");
+        setError("");
+      } catch (err: unknown) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "Could not restore uploaded files.");
         }
-      } catch {
-        // A failed restore is not fatal - the card simply starts empty.
       }
     })();
     return () => {
@@ -246,71 +270,90 @@ export function ImportedSheet({
   }, [groups, activeGroup, activeYear]);
   const totalRows = sheet?.row_count ?? 0;
 
-  async function upload(file: File) {
-    if (file.size > MAX_BYTES) {
-      const msg = "File must be 20 MB or smaller.";
-      setError(msg);
-      toast.error(msg);
-      return;
-    }
+  async function upload(files: File[]) {
+    if (!files.length) return;
     setBusy(true);
     setError("");
-    try {
-      const form = new FormData();
-      form.append("file", file);
-      form.append("scope", scope);
-      const res = await fetch("/api/import/parse", { method: "POST", body: form });
-      const json = (await res.json()) as Partial<ParsedSheet> & { error?: string; warning?: string };
-      if (!res.ok || json.ok !== true || !Array.isArray(json.columns) || !Array.isArray(json.rows)) {
-        throw new Error(json.error || "Could not read this file.");
+    const failures: string[] = [];
+    let imported = 0;
+    for (const file of files) {
+      if (file.size > MAX_BYTES) {
+        failures.push(`${file.name}: file must be 20 MB or smaller.`);
+        continue;
       }
-      const parsed: ParsedSheet = {
-        columns: json.columns.map(String),
-        rows: json.rows as SheetRow[],
-        row_count: Number(json.row_count ?? json.rows.length),
-        sheet: String(json.sheet || file.name),
-        years: Array.isArray(json.years) ? json.years.map(String) : [],
-        year_column: String(json.year_column || ""),
-        year_kind: String(json.year_kind || ""),
-        year_counts: (json.year_counts as Record<string, number>) || {},
-        group_column: String(json.group_column || ""),
-        file_name: String(json.file_name || file.name),
-        file_size: Number(json.file_size ?? file.size),
-      };
-      setSheet(parsed);
-      setActiveGroup("");
-      setOpenSections({});
-      setVisible({});
-      toast.success(`Read ${parsed.row_count.toLocaleString()} row(s) and ${parsed.columns.length} column(s) from ${parsed.file_name}.`);
-      if (json.warning) toast(json.warning, { icon: "\u26a0\ufe0f" });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Upload failed.";
-      setError(msg);
-      toast.error(msg);
-    } finally {
-      setBusy(false);
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("scope", scope);
+        const res = await fetch("/api/import/parse", { method: "POST", body: form });
+        const json = (await res.json()) as Partial<ParsedSheet> & { error?: string; warning?: string };
+        if (!res.ok || json.ok !== true || !Array.isArray(json.columns) || !Array.isArray(json.rows)) {
+          throw new Error(json.error || "Could not read this file.");
+        }
+        const parsed: ParsedSheet = {
+          import_id: String(json.import_id || `${Date.now()}-${file.name}`),
+          saved: Boolean(json.saved),
+          updated_at: json.updated_at ? String(json.updated_at) : undefined,
+          columns: json.columns.map(String),
+          rows: json.rows as SheetRow[],
+          row_count: Number(json.row_count ?? json.rows.length),
+          sheet: String(json.sheet || file.name),
+          years: Array.isArray(json.years) ? json.years.map(String) : [],
+          year_column: String(json.year_column || ""),
+          year_kind: String(json.year_kind || ""),
+          year_counts: (json.year_counts as Record<string, number>) || {},
+          group_column: String(json.group_column || ""),
+          file_name: String(json.file_name || file.name),
+          file_size: Number(json.file_size ?? file.size),
+        };
+        setSheets((previous) => [...previous, parsed]);
+        setActiveSheetId(parsed.import_id);
+        setActiveGroup("");
+        setOpenSections({});
+        setVisible({});
+        imported += 1;
+        if (json.saved) {
+          toast.success(`Imported and saved ${parsed.file_name} (${parsed.row_count.toLocaleString()} rows).`);
+        } else {
+          failures.push(`${file.name}: ${json.warning || "the file could not be saved for refresh."}`);
+          toast.error(`${parsed.file_name} was read but not saved.`);
+        }
+        if (json.warning) toast(json.warning, { icon: "\u26a0\ufe0f" });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Upload failed.";
+        failures.push(`${file.name}: ${msg}`);
+        toast.error(`${file.name}: ${msg}`);
+      }
     }
+    if (failures.length) setError(failures.join(" "));
+    if (imported && !failures.length) {
+      setError("");
+    }
+    setBusy(false);
+    if (inputRef.current) inputRef.current.value = "";
   }
 
-  /** Delete button: removes the saved upload from storage for good. */
-  async function deleteSheet() {
-    if (!sheet || deleting) return;
+  /** Delete one saved upload from storage. */
+  async function deleteSheet(target: ParsedSheet) {
+    if (!target || deleting) return;
     const ok = window.confirm(
-      `Delete the saved upload "${sheet.file_name}"? It is removed from the server - this cannot be undone.`,
+      `Delete the saved upload "${target.file_name}"? It is removed from the server - this cannot be undone.`,
     );
     if (!ok) return;
     setDeleting(true);
     try {
-      const res = await fetch(`/api/import/parse?scope=${scope}`, { method: "DELETE" });
+      const res = await fetch(`/api/import/parse?scope=${scope}&import_id=${encodeURIComponent(target.import_id)}`, { method: "DELETE" });
       const json = (await res.json()) as { error?: string; ok?: boolean };
       if (!res.ok || json.ok !== true) throw new Error(json.error || "Could not delete this file.");
-      setSheet(null);
+      const remaining = sheets.filter((item) => item.import_id !== target.import_id);
+      setSheets(remaining);
+      if (activeSheetId === target.import_id) setActiveSheetId(remaining[0]?.import_id || "");
       setError("");
       setActiveGroup("");
       setOpenSections({});
       setVisible({});
       if (inputRef.current) inputRef.current.value = "";
-      toast.success(`Deleted ${sheet.file_name} from the server.`);
+      toast.success(`Deleted ${target.file_name} from the server.`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Delete failed.";
       setError(msg);
@@ -359,24 +402,15 @@ export function ImportedSheet({
           <p className="mt-0.5 text-[11px] text-[#6B5458]">{hint}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {!readOnly && sheet && (
-            <button
-              onClick={deleteSheet}
-              disabled={deleting || busy}
-              className="rounded-xl border border-red-500/40 px-4 py-2.5 text-xs font-bold text-red-600 transition hover:bg-red-50 disabled:opacity-50"
-              title="Delete the saved upload from the server - it will not come back after a refresh"
-            >
-              {deleting ? "Deleting..." : "\u{1F5D1}\uFE0F Delete"}
-            </button>
-          )}
           {!readOnly && <input
             ref={inputRef}
             type="file"
             accept={ACCEPT}
+            multiple
             className="hidden"
             onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) upload(f);
+              const selected = Array.from(e.target.files || []);
+              if (selected.length) void upload(selected);
             }}
           />}
           {!readOnly && <button
@@ -385,13 +419,56 @@ export function ImportedSheet({
             className="rounded-xl bg-[#7B1113] px-4 py-2.5 text-xs font-bold text-white shadow-md transition hover:bg-[#540111] disabled:opacity-50"
             title="Read every row and column of a CSV or Excel file"
           >
-            {busy ? "Reading file..." : sheet ? "Replace file" : "Upload CSV / Excel"}
+            {busy ? "Importing files..." : "Import CSV / Excel"}
           </button>}
         </div>
       </div>
 
       {error && (
         <div className="border-b border-[#241012]/[0.07] bg-red-50 px-5 py-2.5 text-[11px] font-semibold text-red-600">{error}</div>
+      )}
+      {sheets.length > 0 && (
+        <div className="flex flex-wrap gap-2 border-b border-[#241012]/[0.07] bg-[#FAF7F5]/60 px-5 py-3">
+          {sheets.map((item) => (
+            <span
+              key={item.import_id}
+              className={`inline-flex max-w-full items-center gap-1 rounded-full border px-3 py-1 text-[11px] font-semibold ${
+                sheet?.import_id === item.import_id
+                  ? "border-[#7B1113] bg-[#7B1113] text-white"
+                  : "border-[#241012]/10 bg-white text-[#241012]"
+              }`}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveSheetId(item.import_id);
+                  setActiveGroup("");
+                  setOpenSections({});
+                  setVisible({});
+                }}
+                className="max-w-[18rem] truncate"
+                title={`${item.file_name} · ${item.row_count.toLocaleString()} rows${item.saved ? " · saved" : " · not saved"}`}
+              >
+                {item.file_name} ({item.row_count.toLocaleString()})
+              </button>
+              {!readOnly && (
+                <button
+                  type="button"
+                  onClick={() => void deleteSheet(item)}
+                  disabled={deleting || busy}
+                  aria-label={`Delete ${item.file_name}`}
+                  title={`Delete ${item.file_name}`}
+                  className="rounded-full px-1 leading-none hover:bg-black/10 disabled:opacity-50"
+                >
+                  &times;
+                </button>
+              )}
+            </span>
+          ))}
+          <span className="self-center text-[10px] text-[#6B5458]">
+            {sheets.length} file{sheets.length === 1 ? "" : "s"} · {sheets.reduce((sum, item) => sum + item.row_count, 0).toLocaleString()} total rows
+          </span>
+        </div>
       )}
 
       {!sheet ? (
@@ -417,13 +494,15 @@ export function ImportedSheet({
                 {sheet.year_kind === "level" ? "Year levels in file" : "School years in file"}: {sheet.years.join(" \u00b7 ")}
               </span>
             )}
-            <span
-              className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700"
-              title="This file is stored on the server - it is still here after a refresh. Delete it with the red Delete button."
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-              saved - survives refresh
-            </span>
+            {sheet.saved && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-700"
+                title="This file is stored on the server and will still be available after a refresh."
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                saved - survives refresh
+              </span>
+            )}
             <span className="ml-auto flex flex-wrap items-center gap-1.5">
               <button
                 onClick={() => copyTsv(sheet.columns, sheet.rows, sheet.file_name)}

@@ -121,22 +121,7 @@ def build_docs(applicants: list) -> list:
         )
         seen.add(path)
 
-    for path, meta in index.items():
-        if path in seen:
-            continue
-        docs.append(
-            {
-                "path": path,
-                "size": meta.get("size"),
-                "updated_at": meta.get("updated_at"),
-                "application_id": None,
-                "student_name": None,
-                "declared_income": None,
-                "linked": False,
-            }
-        )
-
-    docs.sort(key=lambda d: (not d["linked"], d["path"]))
+    docs.sort(key=lambda d: d["path"])
     return docs
 
 
@@ -459,7 +444,7 @@ def main() -> int:
         f"scikit-learn {stack.get('scikit-learn')} | joblib {stack.get('joblib')} | "
         f"Pillow {stack.get('pillow')}"
     )
-    log(f"OCR: rapidocr {stack.get('rapidocr-onnxruntime')} | onnxruntime {stack.get('onnxruntime')} (DML)")
+    log(f"OCR: rapidocr {stack.get('rapidocr-onnxruntime')} | onnxruntime {stack.get('onnxruntime')}")
 
     try:
         scan_results: dict = {}
@@ -699,11 +684,17 @@ def main() -> int:
                     f"Model saved with joblib -> {training['model_path']} "
                     f"({training['model_size_kb']} KB) in {training['train_ms']} ms"
                 )
-                if training.get("deployed_path"):
+                if training.get("deployed_path") and training.get("persisted"):
                     log(
-                        f"Deployed for the main AI-Ranking -> {training['deployed_path']}. "
+                        f"Persisted to Storage and deployed for the main AI-Ranking -> {training['deployed_path']}. "
                         "Step 1 -> Step 2 'Execute AI Ranking' will now score applicants "
                         "with this trained model (OCR + ITR / annual income) instead of retraining."
+                    )
+                elif training.get("deployed_path"):
+                    log(
+                        "The model file exists only in this runtime's temporary storage; "
+                        "it was not persisted to Supabase Storage, so a later serverless "
+                        "ranking run may not be able to reuse it."
                     )
 
             if external is not None:
@@ -721,16 +712,18 @@ def main() -> int:
                         "n_trees": training.get("n_trees"),
                         "seed": training.get("seed"),
                         "feature_columns": training.get("feature_columns"),
-                        "accuracy": None,
-                        "precision": None,
-                        "recall": None,
-                        "f1": None,
-                        "roc_auc": None,
-                        "confusion_matrix": None,
-                        "r2": None,
-                        "rmse": None,
-                        "feature_importance": {},
-                        "train_ms": 0.0,
+                        "accuracy": training.get("accuracy"),
+                        "precision": training.get("precision"),
+                        "recall": training.get("recall"),
+                        "f1": training.get("f1"),
+                        "roc_auc": training.get("roc_auc"),
+                        "confusion_matrix": training.get("confusion_matrix"),
+                        "r2": training.get("r2"),
+                        "rmse": training.get("rmse"),
+                        "feature_importance": training.get("feature_importance") or {},
+                        "dataset": training.get("dataset"),
+                        "persisted": training.get("persisted"),
+                        "train_ms": training.get("train_ms", 0.0),
                     }
                 )
 
