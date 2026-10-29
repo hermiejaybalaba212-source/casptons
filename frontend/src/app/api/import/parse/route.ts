@@ -169,7 +169,7 @@ export async function POST(req: Request) {
 
     const projectRoot = path.resolve(process.cwd(), "..");
     const reader = path.join(projectRoot, "backend", "ml", "read_sheet.py");
-    const result = spawnSync(pythonBin, [reader, savedPath], {
+    const result = spawnSync(/* turbopackIgnore: true */ pythonBin, [reader, savedPath], {
       windowsHide: true,
       timeout: 45000,
       maxBuffer: 64 * 1024 * 1024,
@@ -260,7 +260,7 @@ function readStoredFile(bytes: Buffer, name: string): Record<string, unknown> | 
     writeFileSync(savedPath, bytes);
     const projectRoot = path.resolve(process.cwd(), "..");
     const reader = path.join(projectRoot, "backend", "ml", "read_sheet.py");
-    const result = spawnSync(pythonBin, [reader, savedPath], {
+    const result = spawnSync(/* turbopackIgnore: true */ pythonBin, [reader, savedPath], {
       windowsHide: true,
       timeout: 45000,
       maxBuffer: 64 * 1024 * 1024,

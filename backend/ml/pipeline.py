@@ -457,7 +457,7 @@ def main() -> int:
     log(
         f"Python {stack.get('python')} | NumPy {stack.get('numpy')} | "
         f"scikit-learn {stack.get('scikit-learn')} | joblib {stack.get('joblib')} | "
-        f"scipy {stack.get('scipy')} | Pillow {stack.get('pillow')}"
+        f"Pillow {stack.get('pillow')}"
     )
     log(f"OCR: rapidocr {stack.get('rapidocr-onnxruntime')} | onnxruntime {stack.get('onnxruntime')} (DML)")
 

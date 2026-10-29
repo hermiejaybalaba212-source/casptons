@@ -167,7 +167,6 @@ def stack_info() -> dict:
         "numpy",
         "scikit-learn",
         "joblib",
-        "scipy",
         "pillow",
         "rapidocr-onnxruntime",
         "onnxruntime-directml",

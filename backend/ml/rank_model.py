@@ -537,9 +537,15 @@ def predict(rows: List[Dict], trained: Dict) -> List[Dict]:
     # names keeps the run silent and the column order pinned.
     probe = reg or clf
     if probe is not None and getattr(probe, "feature_names_in_", None) is not None:
-        import pandas as pd
-
-        X = pd.DataFrame(X, columns=columns)
+        try:
+            import pandas as pd
+        except ImportError:
+            # scikit-learn accepts the correctly ordered NumPy matrix too.
+            # pandas is optional so the Vercel ML function stays below its
+            # deployment size limit.
+            pass
+        else:
+            X = pd.DataFrame(X, columns=columns)
 
     # Both forests available (the local trainer): use each as designed.
     # Classifier only (the Colab notebook's export): the priority score is the
