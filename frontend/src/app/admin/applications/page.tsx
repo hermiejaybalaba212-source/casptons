@@ -182,6 +182,16 @@ export default function ApplicationsPage() {
   // The one imported-file category is folded until its file-name row is clicked.
   const [importedCollapsed, setImportedCollapsed] = useState(true);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const scrollToImportedRowsRef = useRef(false);
+
+  useEffect(() => {
+    if (importedCollapsed || !scrollToImportedRowsRef.current) return;
+    scrollToImportedRowsRef.current = false;
+    document.getElementById("imported-applications-group")?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+  }, [importedCollapsed]);
 
   // Restore every upload so a refresh does not wipe the imported rows.
   useEffect(() => {
@@ -919,10 +929,24 @@ export default function ApplicationsPage() {
               {importedSheets.map((item) => (
                 <span
                   key={item.import_id}
-                  className="inline-flex max-w-[22rem] shrink-0 items-center gap-2 truncate rounded-full bg-[#7B1113]/10 px-3 py-1.5 text-[11px] font-bold text-[#7B1113]"
-                  title={`${item.file_name} - ${item.row_count.toLocaleString()} row(s) listed in the table below.${item.saved ? " Saved on the server, so it survives a refresh." : " Not saved on the server."}`}
+                  className="inline-flex max-w-[22rem] shrink-0 items-center gap-2 truncate rounded-full bg-[#7B1113]/10 py-1.5 pl-3 pr-1 text-[11px] font-bold text-[#7B1113]"
                 >
-                  <span className="truncate">{"\u{1F4C4}"} {item.file_name} ({item.row_count.toLocaleString()})</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStatusFilter("");
+                      setSearch("");
+                      setProgramFilter("");
+                      setImportedVisible(INITIAL_IMPORTED_ROWS);
+                      scrollToImportedRowsRef.current = true;
+                      setImportedCollapsed(false);
+                    }}
+                    className="min-w-0 truncate rounded-full px-1.5 py-0.5 text-left transition hover:bg-[#7B1113]/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#7B1113]"
+                    title={`${item.file_name} - click to view ${item.row_count.toLocaleString()} imported row(s).${item.saved ? " Saved on the server, so it survives a refresh." : " Not saved on the server."}`}
+                    aria-label={`View ${item.row_count.toLocaleString()} rows from ${item.file_name}`}
+                  >
+                    {"\u{1F4C4}"} {item.file_name} ({item.row_count.toLocaleString()})
+                  </button>
                   <button
                     onClick={() => void deleteImportedSheet(item)}
                     disabled={deletingImport}
@@ -1117,6 +1141,7 @@ export default function ApplicationsPage() {
                   {/* Keep rows from every imported file together as one historical-data group. */}
                   {importedSheets.length > 0 && importedRowCount > 0 && (
                     <tr
+                      id="imported-applications-group"
                       className="cursor-pointer bg-[#7B1113]/[0.06] transition hover:bg-[#7B1113]/[0.1]"
                       onClick={() => {
                         if (importedCollapsed) {
