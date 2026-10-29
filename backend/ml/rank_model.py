@@ -621,11 +621,10 @@ def load_external(path=None, required: bool = False) -> Optional[Dict]:
 
 
 def _income_for_tiebreak(item: Dict) -> float:
-    """Return effective annual income for deterministic model-probability ties.
+    """Return declared annual income for deterministic model-probability ties.
 
-    ``annual_income_family`` is the raw TOINC / annual income that the file
-    rows carry. OCR-corrected income takes precedence; rows without a usable
-    income sort last within a probability tie.
+    ``income_used`` is the declared amount mapped to TOINC for this model.
+    Rows without a usable declared amount sort last within a probability tie.
     """
     for key in ("income_used", "declared_income", "annual_income_family", "ocr_income"):
         value = item.get(key)
@@ -701,7 +700,7 @@ def predict(rows: List[Dict], trained: Dict) -> List[Dict]:
                     "income_used",
                     "income_source",
                     "income_delta",
-                    "income_corrected",
+                    "ocr_income_differs",
                     "ocr_match_pct",
                     "ocr_exact_match",
                     "ocr_status",
@@ -724,7 +723,7 @@ def predict(rows: List[Dict], trained: Dict) -> List[Dict]:
         )
 
     # The trained model's predicted prioritized-class probability is the
-    # ranking basis. OCR-corrected income breaks probability ties, lowest first.
+    # ranking basis. Declared income breaks probability ties; OCR is audit-only.
     ranked.sort(
         key=lambda item: (
             -item["probability"],

@@ -596,17 +596,18 @@ def main() -> int:
                         "the same freshly trained model will score this program's applicants."
                     )
 
-                corrected = [r for r in rows if r.get("income_corrected")]
-                for item in corrected:
+                mismatches = [r for r in rows if r.get("ocr_income_differs")]
+                for item in mismatches:
                     log(
-                        f"ITR income used for {item['student_name']}: {_peso(item.get('income_used'))} "
-                        f"(applicant typed {_peso(item.get('declared_income'))}) - the scanned ITR is the "
-                        "source of truth for the financial-need score."
+                        f"ITR income check for {item['student_name']}: OCR read "
+                        f"{_peso(item.get('ocr_income'))}, applicant entered "
+                        f"{_peso(item.get('declared_income'))}; the declared income remains "
+                        "the model input. Review the mismatch."
                     )
-                if not corrected and any(r.get("ocr_income") is not None for r in rows):
-                    log("OCR income matches the typed income - no correction needed.")
+                if not mismatches and any(r.get("ocr_income") is not None for r in rows):
+                    log("OCR income matches the typed income; declared income remains the model input.")
                 elif not any(r.get("ocr_income") is not None for r in rows):
-                    log("No OCR income available - ranking falls back to the typed income.")
+                    log("No OCR income available; the declared annual income remains the model input.")
 
                 comparable = [r for r in rows if r["ocr_status"] == "match"]
                 log(
@@ -796,7 +797,7 @@ def main() -> int:
                     )
                 log(
                     "Ranking complete: highest model-predicted priority probability ranks first; "
-                    "lower OCR-corrected annual income breaks ties."
+                    "lower declared annual income breaks ties. OCR is shown as a separate ITR check."
                 )
 
         emit(

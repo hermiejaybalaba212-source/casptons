@@ -44,6 +44,43 @@ class FixedProbabilityClassifier:
 
 
 class RankingAnalyticsTests(unittest.TestCase):
+    def test_ocr_income_is_audit_only_and_declared_income_builds_colab_features(self):
+        applicant = {
+            "application_id": 1,
+            "declared_income": 120_000,
+            "itr_path": "applicant/itr.png",
+        }
+        ocr_result = {
+            "ocr_value": 300_000,
+            "match": {"align_pct": 40.0, "exact_match": False, "status": "mismatch"},
+        }
+
+        row = features.build_row(applicant, ocr_result)
+        alternate_ocr_row = features.build_row(
+            applicant,
+            {
+                "ocr_value": 80_000,
+                "match": {"align_pct": 66.7, "exact_match": False, "status": "mismatch"},
+            },
+        )
+
+        self.assertEqual(row["income_used"], 120_000)
+        self.assertEqual(row["income_source"], "declared")
+        self.assertEqual(row["annual_income_family"], 120_000)
+        self.assertEqual(row["monthly_income_equiv"], 10_000)
+        self.assertEqual(row["is_train_tax_exempt"], 1.0)
+        self.assertEqual(row["itr_income_bracket"], 2.0)
+        self.assertEqual(row["ocr_income"], 300_000)
+        self.assertEqual(row["income_delta"], 180_000)
+        self.assertTrue(row["ocr_income_differs"])
+        self.assertEqual(row["ocr_match_pct"], 40.0)
+        model_input, _ = features.matrix([row], columns=features.NOTEBOOK_FEATURE_COLUMNS)
+        alternate_model_input, _ = features.matrix(
+            [alternate_ocr_row],
+            columns=features.NOTEBOOK_FEATURE_COLUMNS,
+        )
+        np.testing.assert_array_equal(model_input, alternate_model_input)
+
     def test_sheet_reader_parses_upload_bytes(self):
         parsed = _parse_sheet(
             "previous-applications.csv",

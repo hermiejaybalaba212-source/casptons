@@ -89,10 +89,9 @@ INCOME_CEIL = 600_000.0        # annual family income -> need score 0
 HIGH_NEED_INCOME = 150_000.0   # app-wide "High Need" cut-off (matches lib/ml)
 
 # --- composite priority target (what the regressor learns) ---------------
-# Priority scores are based on financial need only (the income read from the
-# ITR). Academic grades and OCR match are not score components. The final
-# applicant ordering uses the effective annual income directly, lowest first;
-# the OCR match percentage is retained as a validation signal for review.
+# Colab-aligned ranking uses the trained classifier probability on declared
+# annual-income features. OCR match is a separate validation signal and does
+# not change model inputs or priority ordering.
 W_NEED = 1.00                  # financial need score (driven by the ITR income)
 W_OCR = 0.00                   # comparison is for review, not a score component
 W_ACADEMIC = 0.00              # academics excluded on purpose

@@ -297,12 +297,11 @@ def effective_income(
     ocr_value: Optional[float],
     low_confidence: bool = False,
 ) -> Tuple[Optional[float], str]:
-    """The figure the ranking actually uses.
+    """Choose an income for OCR-only document analytics.
 
-    The ITR is the source of truth: when OCR produced an income value the
-    ranking is driven by it, even when the applicant typed something else.
-    The declared value is only used when OCR produced nothing (or only a
-    low-confidence fallback).
+    This helper is used by per-document OCR analytics. Applicant ranking
+    features are built separately from the declared amount so OCR remains an
+    audit comparison and cannot override the Colab model input.
     """
     ocr = None
     if ocr_value is not None:
@@ -327,13 +326,11 @@ def effective_income(
 
 
 def build_row(applicant: Dict, ocr_result: Optional[Dict]) -> Dict:
-    """One applicant -> derived features used by both the RF and the UI."""
+    """Build model features from declared income and retain OCR as audit data."""
     declared = applicant.get("declared_income")
     ocr_value = (ocr_result or {}).get("ocr_value")
     match = (ocr_result or {}).get("match") or {}
-    low_confidence = bool((ocr_result or {}).get("low_confidence"))
-
-    income_used, income_source = effective_income(declared, ocr_value, low_confidence)
+    income_used, income_source = effective_income(declared, None)
     delta = None
     if declared is not None and ocr_value is not None:
         try:
@@ -381,9 +378,7 @@ def build_row(applicant: Dict, ocr_result: Optional[Dict]) -> Dict:
         "income_used": income_used,
         "income_source": income_source,
         "income_delta": delta,
-        "income_corrected": bool(
-            income_source == "ocr" and delta is not None and abs(delta) > 0.005
-        ),
+        "ocr_income_differs": bool(delta is not None and abs(delta) > 0.005),
         "itr_path": applicant.get("itr_path"),
         "financial_need_score": financial_need_score(income_used),
         "ocr_match_pct": float(match.get("align_pct") or 0.0),

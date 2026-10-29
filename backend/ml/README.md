@@ -71,10 +71,11 @@ its evaluation and dataset analytics.
 
 The classifier's predicted probability of the prioritized class is the primary
 ranking value, so the model that was trained from the dataset also determines
-the applicant order. Highest probability ranks first. Effective annual income
-(reliable OCR correction first, otherwise declared income) breaks probability
-ties, lowest income first. The model's predicted class, probability, priority
-score, and OCR match status remain visible for review.
+the applicant order. Highest probability ranks first. The applicant's declared
+annual family income is mapped to the `TOINC` feature and breaks probability
+ties, lowest declared income first. OCR reads the ITR as a separate audit check:
+the detected amount and match percentage are displayed, but OCR does not
+replace model input or affect the model probability.
 
 The dataset summary and model analytics are stored inside the deployed model
 artifact in Supabase Storage. Accuracy, precision, recall, F1, and ROC-AUC are

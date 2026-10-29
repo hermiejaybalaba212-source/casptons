@@ -294,7 +294,7 @@ interface RankedRow {
   income_used: number | null;
   income_source?: string | null;
   income_delta?: number | null;
-  income_corrected?: boolean;
+  ocr_income_differs?: boolean;
   ocr_match_pct: number | null;
   ocr_exact_match?: boolean;
   ocr_status: string;
@@ -713,8 +713,8 @@ export default function MLRankingPage() {
         pushLog({
           msg:
             "No pending applicant has an uploaded ITR with income data - continuing anyway. "
-          + "Applicants without an OCR income use their declared income when available; "
-          + "rows with no income are placed last. The uploaded model still scores every applicant.",
+          + "The model uses declared income when available; OCR only compares the ITR against it. "
+          + "Applicants without declared income are still scored with the model's missing-value handling.",
         });
       }
 
@@ -1362,19 +1362,19 @@ export default function MLRankingPage() {
           <p className="mb-2 text-[10px] font-bold uppercase tracking-wide text-[#7B1113]">How this ranking works</p>
           <div className="grid gap-2 text-[11px] leading-5 text-[#6B5458] sm:grid-cols-3">
             <p className="rounded-lg bg-[#FAF7F5]/70 px-3 py-2">
-              <b className="text-[#241012]">1. ITR income only</b>
+              <b className="text-[#241012]">1. Trained model decides priority</b>
               <br />
-              Need comes from the OCR-scanned ITR &mdash; grades are not used.
+              The Colab-aligned Random Forest predicts priority from the five TOINC-derived income features.
             </p>
             <p className="rounded-lg bg-[#FAF7F5]/70 px-3 py-2">
-              <b className="text-[#241012]">2. OCR-corrected income</b>
+              <b className="text-[#241012]">2. Declared income is the model input</b>
               <br />
-              A reliable ITR read corrects typed income before the model ranks applicants.
+              OCR reads the ITR and compares it with the entered annual income; it flags differences but does not replace the input.
             </p>
             <p className="rounded-lg bg-[#FAF7F5]/70 px-3 py-2">
-              <b className="text-[#241012]">3. Lowest income first</b>
+              <b className="text-[#241012]">3. OCR is an audit check</b>
               <br />
-              Applicants sort by annual family income used; OCR match is shown for review, not a rank gate.
+              Highest model-predicted priority ranks first; declared income breaks probability ties. OCR match is shown for review.
             </p>
           </div>
           <p className="mt-2 text-[11px] leading-5 text-[#6B5458]">
@@ -1782,7 +1782,7 @@ export default function MLRankingPage() {
                 <span className="text-[#6B5458]">
                   {ranked.some((row) => row.savedResultOnly)
                     ? "saved ranking values restored from the database"
-                    : "reliable OCR income corrects typed income; match status remains visible for review"}
+                    : "declared income feeds the model; OCR only checks it against the ITR"}
                 </span>
               </p>
             </div>
@@ -1815,7 +1815,7 @@ export default function MLRankingPage() {
               {savedRankings[0]?.generated_date
                 ? ` \u00b7 last saved ${new Date(savedRankings[0].generated_date).toLocaleString("en-PH")}`
                 : ""}
-              . Rank, priority score, prediction, and applicant details persist. OCR corrections, full execution logs,
+              . Rank, priority score, prediction, and applicant details persist. OCR comparisons, full execution logs,
               and training analytics are not stored in the current ranking table.
             </div>
           )}
@@ -1859,7 +1859,7 @@ export default function MLRankingPage() {
                   <th className="px-4 py-3 font-bold">Year</th>
                   <th className="px-4 py-3 font-bold">Sex</th>
                   <th className="px-4 py-3 font-bold">Scholarship</th>
-                  <th className="px-4 py-3 font-bold">Income used</th>
+                  <th className="px-4 py-3 font-bold">Declared / model income</th>
                   <th className="px-4 py-3 font-bold">OCR match</th>
                   <th className="px-4 py-3 font-bold">Financial need</th>
                   <th className="px-4 py-3 font-bold">Priority</th>
@@ -1899,9 +1899,9 @@ export default function MLRankingPage() {
               <b className="text-[#7B1113]">{ranked.filter((r) => r.prediction === "High Need").length}</b>
             </span>
             <span>
-              OCR corrected income{" "}
+              OCR income differs{" "}
               <b className="text-[#7B1113]">
-                {ranked.some((row) => row.savedResultOnly) ? "\u2014" : ranked.filter((r) => r.income_corrected).length}
+                {ranked.some((row) => row.savedResultOnly) ? "\u2014" : ranked.filter((r) => r.ocr_income_differs).length}
               </b>
             </span>
             <span className="ml-auto">
@@ -2170,9 +2170,9 @@ function RankRow({
     trust === "not_saved"
       ? { cls: "bg-gray-100 text-gray-600 ring-gray-300/50", dot: "bg-gray-400", text: "Details not saved", title: "The ranking row persisted, but OCR details are not part of the current ranking_result table" }
       : trust === "verified"
-      ? { cls: "bg-[#D1FAE5] text-[#065F46] ring-[#059669]/30", dot: "bg-emerald-500", text: `${pct(row.ocr_match_pct, 1)} \u2713`, title: "Typed income matches the scanned ITR; ranking is by annual income used" }
+      ? { cls: "bg-[#D1FAE5] text-[#065F46] ring-[#059669]/30", dot: "bg-emerald-500", text: `${pct(row.ocr_match_pct, 1)} \u2713`, title: "Typed income matches the scanned ITR; the trained model ranks applicants" }
       : trust === "mismatch"
-        ? { cls: "bg-[#FEF3C7] text-[#92400E] ring-[#D97706]/30", dot: "bg-amber-500", text: `${pct(row.ocr_match_pct, 1)} \u2717`, title: "Typed income differs from the ITR; a reliable OCR read corrects the income used for ranking" }
+        ? { cls: "bg-[#FEF3C7] text-[#92400E] ring-[#D97706]/30", dot: "bg-amber-500", text: `${pct(row.ocr_match_pct, 1)} \u2717`, title: "Typed income differs from the ITR; OCR is an audit warning and does not change model input" }
         : { cls: "bg-gray-100 text-gray-600 ring-gray-300/50", dot: "bg-gray-400", text: "No ITR", title: "No ITR uploaded; declared annual income is used when available" };
   const trustNote =
     trust === "not_saved"
@@ -2180,7 +2180,7 @@ function RankRow({
       : trust === "verified"
       ? `Typed income matches the ITR (${pct(row.ocr_match_pct, 1)})`
       : trust === "mismatch"
-        ? `Typed income differs from the ITR (${pct(row.ocr_match_pct, 1)}); a reliable OCR figure is used`
+        ? `Typed income differs from the ITR (${pct(row.ocr_match_pct, 1)}); declared income remains the model input`
         : "No ITR uploaded; declared income is used when available";
   return (
     <>
@@ -2214,13 +2214,13 @@ function RankRow({
           <div className="text-[10px] text-[#8B7376]">
             {row.savedResultOnly
               ? "income details not saved"
-              : row.income_source?.startsWith("ocr")
-              ? `from ITR \u00b7 typed ${peso(row.declared_income)}`
-              : "typed by applicant"}
+              : row.income_source === "declared"
+                ? "declared income · model input"
+                : "no declared income"}
           </div>
-          {row.income_corrected && row.income_delta != null && (
+          {row.ocr_income_differs && row.income_delta != null && (
             <div className="text-[10px] font-bold text-amber-700">
-              OCR corrected {row.income_delta > 0 ? "+" : ""}{peso(row.income_delta)}
+              OCR differs {row.income_delta > 0 ? "+" : ""}{peso(row.income_delta)}
             </div>
           )}
         </td>
@@ -2271,9 +2271,9 @@ function RankRow({
                   <span>Income used for ranking</span>
                   <b className="text-[#7B1113]">{peso(row.income_used ?? row.declared_income)}</b>
                 </p>
-                {row.income_corrected && row.income_delta != null && (
+                {row.ocr_income_differs && row.income_delta != null && (
                   <p className="mt-1 rounded-lg bg-amber-50 px-2 py-1 text-amber-700">
-                    ITR differs by {row.income_delta > 0 ? "+" : ""}{peso(row.income_delta)} &mdash; the scanned ITR was used.
+                    OCR differs by {row.income_delta > 0 ? "+" : ""}{peso(row.income_delta)} &mdash; shown for review; declared income remains the model input.
                   </p>
                 )}
                 <p className="flex justify-between gap-2 py-0.5">
@@ -2286,12 +2286,11 @@ function RankRow({
               <div className="rounded-xl border border-[#241012]/[0.06] bg-white p-3.5">
                 <p className="mb-1.5 text-[10px] font-bold uppercase tracking-wide text-[#6B5458]">Model inputs</p>
                 <p className="flex justify-between gap-2 py-0.5">
-                  <span>Income ordering</span>
-                  <b className="text-[#7B1113]">Lowest annual income first</b>
+                  <span>Ranking basis</span>
+                  <b className="text-[#7B1113]">Model priority probability</b>
                 </p>
                 <p className="flex justify-between gap-2 py-0.5">Financial need score <b>{row.financial_need_score?.toFixed(1) ?? "\u2014"}</b></p>
-                <p className="flex justify-between gap-2 py-0.5">OCR match score <b>{row.ocr_match_pct?.toFixed(2) ?? "\u2014"}</b></p>
-                <p className="flex justify-between gap-2 py-0.5">Priority target <b>{row.priority_target?.toFixed(2) ?? "\u2014"}</b></p>
+                <p className="flex justify-between gap-2 py-0.5">OCR match (audit only) <b>{row.ocr_match_pct?.toFixed(2) ?? "\u2014"}</b></p>
                 <p className="flex justify-between gap-2 py-0.5">Priority score (predicted) <b className="text-[#7B1113]">{row.priority_score.toFixed(2)}</b></p>
                 {row.probability != null && (
                   <p className="flex justify-between gap-2 py-0.5">P(high need) <b>{(row.probability * 100).toFixed(1)}%</b></p>
