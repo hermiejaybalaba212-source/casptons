@@ -33,6 +33,26 @@ _EOF = object()
 app = FastAPI(title="scholar-capstone2 ML pipeline", version="1.0.0")
 
 
+def _runtime_python() -> tuple[str, dict[str, str]]:
+    """Run the child pipeline with packages installed by Vercel's Python runtime."""
+    runtime_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    site_packages = [
+        path
+        for root in (Path("/tmp/_vc_deps/lib"), Path("/var/task/.venv/lib"))
+        if root.exists()
+        for path in root.glob("python*/site-packages")
+        if path.is_dir()
+    ]
+    if site_packages:
+        existing = runtime_env.get("PYTHONPATH", "")
+        runtime_env["PYTHONPATH"] = os.pathsep.join(
+            [*(str(path) for path in site_packages), existing] if existing else [str(path) for path in site_packages]
+        )
+
+    virtualenv_python = Path("/tmp/_vc_deps/bin/python")
+    return (str(virtualenv_python) if virtualenv_python.exists() else sys.executable), runtime_env
+
+
 @app.get("/")
 def health() -> JSONResponse:
     return JSONResponse({"ok": True, "service": "ml", "python": sys.version.split()[0]})
@@ -44,13 +64,14 @@ def pipeline(payload: dict) -> StreamingResponse:
 
 
 def _stream_pipeline(payload: dict) -> Iterator[str]:
+    python_bin, runtime_env = _runtime_python()
     proc = subprocess.Popen(
-        [sys.executable, str(ML_DIR / "pipeline.py")],
+        [python_bin, str(ML_DIR / "pipeline.py")],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         cwd=str(ML_DIR),
-        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        env=runtime_env,
         text=True,
         encoding="utf-8",
         errors="replace",
